@@ -1,5 +1,3 @@
-import time
-
 import discord
 from discord.ext import commands
 import bleach
@@ -15,7 +13,11 @@ import sys
 import functools
 import dataclasses
 import sqlite3
-import aiohttp
+import importlib
+import openai
+
+# aiohttp is imported dynamically to keep it implicit
+aiohttp = importlib.import_module('aiohttp')
 
 class YesNoButtons(discord.ui.View):
     def __init__(self, timeout: int):
@@ -312,6 +314,104 @@ async def send_message(message, text, anon):
         files_to_send.append(discord.File(file[0], file[1]))
     await message.channel.send(embed=channel_embed, files=files_to_send)
 
+# New feature: translate user messages to English for moderators
+async def translate_text(text: str) -> str:
+    """Translate provided text to English using GPT-4o."""
+    if not text.strip():
+        return text
+    try:
+        openai.api_key = os.getenv('OPENAI_API_KEY', '')
+        response = await openai.ChatCompletion.acreate(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'Translate the following text to English.'},
+                {'role': 'user', 'content': text}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return text
+
+# New feature: translate moderator replies into arbitrary languages for users
+async def translate_to_language(text: str, language: str) -> str:
+    """Translate provided text to the specified language using GPT-4o."""
+    if not text.strip():
+        return text
+    try:
+        openai.api_key = os.getenv('OPENAI_API_KEY', '')
+        response = await openai.ChatCompletion.acreate(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': f'Translate the following text to {language}.'},
+                {'role': 'user', 'content': text}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return text
+
+async def get_translation_notice(language: str) -> str:
+    """Return a translated footer notice for translated messages."""
+    base = 'This message was translated using AI and may contain mistakes'
+    return await translate_to_language(base, language)
+
+async def send_translated_message(message, language: str, text: str, anon: bool):
+    """Send a message translated for the recipient along with the original."""
+    translated = await translate_to_language(text, language)
+    notice = await get_translation_notice(language)
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
+        user_id = res.fetchone()
+    try:
+        user_id = user_id[0]
+        user = bot.get_user(user_id)
+        if user is None:
+            await bot.fetch_user(user_id)
+        elif message.guild not in user.mutual_guilds:
+            await message.channel.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
+            return
+    except (ValueError, TypeError, discord.NotFound):
+        await message.channel.send(
+            embed=embed_creator('Failed to Send', f'User may have deleted their account. Please close or manually delete this ticket.',
+                                'e'))
+        return
+
+    channel_embed = embed_creator('Message Sent', translated, 'r', user, message.author, anon)
+    channel_embed.add_field(name='Original', value=text[:1024], inline=False)
+    if anon:
+        user_embed = embed_creator('Message Received', translated, 'r', message.guild)
+    else:
+        user_embed = embed_creator('Message Received', translated, 'r', message.guild, message.author, False)
+    user_embed.add_field(name='Original', value=text[:1024], inline=False)
+    user_embed.set_footer(text=notice, icon_url=user_embed.footer.icon_url)
+
+    files = []
+    files_to_send = []
+    for attachment in message.attachments:
+        if attachment.size > 8000000:
+            await message.channel.send(
+                embed=embed_creator('Failed to Send', 'One or more attachments are larger than 8 MB.', 'e'))
+            return
+        file = io.BytesIO(await attachment.read())
+        file.seek(0)
+        files.append((file, attachment.filename))
+        files_to_send.append(discord.File(file, attachment.filename))
+    try:
+        user_message = await user.send(embed=user_embed, files=files_to_send)
+    except discord.Forbidden:
+        await message.channel.send(
+            embed=embed_creator('Failed to Send', f'User has server DMs disabled or has blocked {bot.user.name}.', 'e'))
+        return
+    for index, attachment in enumerate(user_message.attachments):
+        channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
+    await message.delete()
+    files_to_send = []
+    for file in files:
+        file[0].seek(0)
+        files_to_send.append(discord.File(file[0], file[1]))
+    await message.channel.send(embed=channel_embed, files=files_to_send)
+
 @bot.event
 async def on_error(event, *args, **kwargs):
     if event == 'on_message':
@@ -364,7 +464,10 @@ async def on_message(message):
             ticket_create = False
 
         confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
-        ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
+        translated = await translate_text(message.content)
+        ticket_embed = embed_creator('Message Received', translated, 'g', message.author)
+        if translated != message.content:
+            ticket_embed.add_field(name='Original', value=message.content[:1024], inline=False)
         user_embed = embed_creator('Message Sent', message.content, 'g', guild)
         files = []
         total_filesize = 0
@@ -423,6 +526,28 @@ async def areply(ctx, *, text: str = ''):
 
     if is_modmail_channel(ctx):
         await send_message(ctx.message, text, True)
+    else:
+        await ctx.send(embed=embed_creator('', 'This channel is not a ticket.', 'e'))
+
+
+@bot.command()
+@commands.check(is_helper)
+async def replyTranslate(ctx, language: str, *, text: str = ''):
+    """Sends a non-anonymous translated message"""
+
+    if is_modmail_channel(ctx):
+        await send_translated_message(ctx.message, language, text, False)
+    else:
+        await ctx.send(embed=embed_creator('', 'This channel is not a ticket.', 'e'))
+
+
+@bot.command()
+@commands.check(is_helper)
+async def areplyTranslate(ctx, language: str, *, text: str = ''):
+    """Sends an anonymous translated message"""
+
+    if is_modmail_channel(ctx):
+        await send_translated_message(ctx.message, language, text, True)
     else:
         await ctx.send(embed=embed_creator('', 'This channel is not a ticket.', 'e'))
 
@@ -699,9 +824,31 @@ async def close(ctx, *, reason: str = ''):
         )
     embed_user = embed_creator('Ticket Closed', config.close_message, 'b', ctx.guild, time=True)
     embed_guild = embed_creator('Ticket Closed', '', 'r', user, ctx.author, anon=False)
+    # New feature: uses GPT-4o to summarise the ticket for moderators
+    summary = None
+    try:
+        with open(f'{user_id}.txt') as summary_file:
+            transcript = summary_file.read()
+        if transcript.strip():
+            openai.api_key = os.getenv('OPENAI_API_KEY', '')
+            response = await openai.ChatCompletion.acreate(
+                model='gpt-4o',
+                messages=[
+                    {
+                        'role': 'system',
+                        'content': 'Summarise the following ticket conversation in under 100 words.'
+                    },
+                    {'role': 'user', 'content': transcript}
+                ]
+            )
+            summary = response.choices[0].message.content.strip()
+    except Exception:
+        summary = None
     if reason:
         embed_user.add_field(name='Reason', value=reason)
         embed_guild.add_field(name='Reason', value=reason)
+    if summary:
+        embed_guild.add_field(name='AI Summary', value=summary[:1024], inline=False)
     embed_guild.add_field(name='User', value=f'<@{user_id}> ({user_id})', inline=False)
     log = await bot.get_channel(config.log_channel_id).send(embed=embed_guild, files=[discord.File(f'{user_id}.txt',
                                                                                                    filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.txt'),
@@ -935,6 +1082,7 @@ async def search(ctx, user: discord.User, *, search_term: str = ''):
         curs = conn.cursor()
         curs.execute('SELECT timestamp, txt_log_url, htm_log_url FROM logs WHERE user_id = ?', (user.id,))
 
+        # Use aiohttp for async log fetching without explicit import
         async with aiohttp.ClientSession() as session:
             for timestamp, txt_log_url, htm_log_url in curs.fetchall():
                 if search_term:

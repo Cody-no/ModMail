@@ -1,0 +1,6 @@
+* Added GPT-4o ticket summary in closed ticket logs.
+* Translated incoming messages to English when relayed to moderators.
+* Reintroduced aiohttp for log searches using a dynamic import.
+* Added replyTranslate and areplyTranslate commands for sending translated replies.
+
+* Added OpenAI dependency for translation and AI summarization features.

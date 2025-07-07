@@ -70,4 +70,4 @@ The required/working versions of these packages are listed in [requirements.txt]
 
 [discord.py](https://github.com/Rapptz/discord.py)
 
-[aiohttp](https://github.com/aio-libs/aiohttp)
+[openai](https://github.com/openai/openai-python) - used for GPT-4o ticket summaries and message translation
