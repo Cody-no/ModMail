@@ -23,8 +23,6 @@ from dotenv import load_dotenv
 
 # Load variables from a .env file for token and API access
 load_dotenv()
-translator = Translator()
-LANGUAGE_CODES = {v.lower(): k for k, v in LANGUAGES.items()}
 class YesNoButtons(discord.ui.View):
     def __init__(self, timeout: int):
         super().__init__(timeout=timeout)
@@ -552,7 +550,7 @@ async def areply(ctx, *, text: str = ''):
 
 @bot.command()
 @commands.check(is_helper)
-async def replyTranslate(ctx, language: str, *, text: str = ''):
+async def replyt(ctx, language: str, *, text: str = ''):
     """Sends a non-anonymous translated message"""
 
     if is_modmail_channel(ctx):
@@ -563,7 +561,7 @@ async def replyTranslate(ctx, language: str, *, text: str = ''):
 
 @bot.command()
 @commands.check(is_helper)
-async def areplyTranslate(ctx, language: str, *, text: str = ''):
+async def areplyt(ctx, language: str, *, text: str = ''):
     """Sends an anonymous translated message"""
 
     if is_modmail_channel(ctx):
