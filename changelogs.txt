@@ -3,3 +3,5 @@
 * Added replyTranslate and areplyTranslate commands for sending translated replies.
 * Added OpenAI dependency for translation and AI summarization features.
 * Tokens and API keys now load from a .env file using python-dotenv.
+* Implemented googletrans fallback for translation commands when OpenAI fails.
+* Corrected OpenAI API calls using AsyncOpenAI client.
