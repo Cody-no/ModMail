@@ -18,7 +18,7 @@ import sqlite3
 import asyncio
 import aiohttp  # used for fetching logs in the search command
 import openai
-from googletrans import Translator, LANGUAGES
+import httpx
 from dotenv import load_dotenv
 
 # Load variables from a .env file for token and API access
@@ -89,7 +89,9 @@ with open('config.json', 'r') as config_file:
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
-openai_client = openai.AsyncOpenAI(api_key=openai.api_key)
+http_client = httpx.AsyncClient()
+openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
+
 
 try:
     with open('snippets.json', 'r') as snippets_file:
