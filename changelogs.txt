@@ -4,5 +4,5 @@
 * Added OpenAI dependency for translation and AI summarization features.
 * Tokens and API keys now load from a .env file using python-dotenv.
 * Corrected OpenAI API calls using AsyncOpenAI client.
-* Removed googletrans fallback and dependency.
 * Initialized OpenAI client with httpx.AsyncClient to avoid proxy errors.
+
