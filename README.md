@@ -41,7 +41,8 @@ I would recommend storing your own external backups, especially of `logs.db` bec
 
 #### config.json
 
-- `token` is your bot account's token from the Discord Developer Portal.
+- `token` is your bot account's token from the Discord Developer Portal. This value can be set in a `.env` file.
+- `OPENAI_API_KEY` should also be placed in the `.env` file if you use the AI features.
 - `guild_id` is your server's ID.
 - `category_id` is the ID of the category that tickets to be created in. You will have to create this yourself.
 - `log_channel_id` is the ID of the channel that ticket logs will be sent in.
@@ -70,4 +71,5 @@ The required/working versions of these packages are listed in [requirements.txt]
 
 [discord.py](https://github.com/Rapptz/discord.py)
 
-[aiohttp](https://github.com/aio-libs/aiohttp)
+[openai](https://github.com/openai/openai-python) - used for GPT-4o ticket summaries and message translation
+[python-dotenv](https://github.com/theskumar/python-dotenv) - loads environment variables from a .env file
