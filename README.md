@@ -3,7 +3,7 @@ A modmail bot for Discord.
 
 A fork of [Tobiwan's modmail](https://github.com/TobiWan54/ModMail)
 
-Credit goes to Tobiwan for making the bot. I'm just modifying it to match some feature that [ModMail by Chamburr ](https://github.com/chamburr/modmail) has.
+Credit goes to Tobiwan for making the bot. I'm just modifying it to match some feature that [ModMail by Chamburr ](https://github.com/chamburr/modmail) has, as well as adding some ai translation features.
 
 ## Features
 When a user messages the bot, a new channel is created in a category in your server, representing a ticket. As you would expect from a Modmail bot, 
