@@ -18,6 +18,7 @@ import sqlite3
 import asyncio
 import aiohttp  # used for fetching logs in the search command
 import openai
+import httpx
 from dotenv import load_dotenv
 
 # Load variables from a .env file for token and API access
@@ -86,6 +87,9 @@ with open('config.json', 'r') as config_file:
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
+# Initialize AsyncOpenAI client with a custom httpx client to avoid proxy issues
+http_client = httpx.AsyncClient()
+openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
 
 try:
     with open('snippets.json', 'r') as snippets_file:
@@ -327,7 +331,7 @@ async def translate_text(text: str) -> str:
     if not text.strip():
         return text
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await openai_client.chat.completions.create(
             model='gpt-4o',
             messages=[
                 {'role': 'system', 'content': 'Translate the following text to English.'},
@@ -344,7 +348,7 @@ async def translate_to_language(text: str, language: str) -> str:
     if not text.strip():
         return text
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await openai_client.chat.completions.create(
             model='gpt-4o',
             messages=[
                 {'role': 'system', 'content': f'Translate the following text to {language}.'},
@@ -835,7 +839,7 @@ async def close(ctx, *, reason: str = ''):
         with open(f'{user_id}.txt') as summary_file:
             transcript = summary_file.read()
         if transcript.strip():
-            response = await openai.ChatCompletion.acreate(
+            response = await openai_client.chat.completions.create(
                 model='gpt-4o',
                 messages=[
                     {
