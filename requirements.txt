@@ -2,7 +2,5 @@ bleach==6.1.0
 discord.py==2.3.2
 openai
 python-dotenv
-# Used for fallback translation when OpenAI fails
-googletrans==4.0.0rc1
 # aiohttp is automatically installed by discord.py
 

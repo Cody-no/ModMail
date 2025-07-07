@@ -18,13 +18,11 @@ import sqlite3
 import asyncio
 import aiohttp  # used for fetching logs in the search command
 import openai
-from googletrans import Translator, LANGUAGES
+import httpx
 from dotenv import load_dotenv
 
 # Load variables from a .env file for token and API access
 load_dotenv()
-translator = Translator()
-LANGUAGE_CODES = {v.lower(): k for k, v in LANGUAGES.items()}
 class YesNoButtons(discord.ui.View):
     def __init__(self, timeout: int):
         super().__init__(timeout=timeout)
@@ -89,7 +87,9 @@ with open('config.json', 'r') as config_file:
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
-openai_client = openai.AsyncOpenAI(api_key=openai.api_key)
+# Initialize AsyncOpenAI client with a custom httpx client to avoid proxy issues
+http_client = httpx.AsyncClient()
+openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
 
 try:
     with open('snippets.json', 'r') as snippets_file:
@@ -327,7 +327,7 @@ async def send_message(message, text, anon):
 
 # New feature: translate user messages to English for moderators
 async def translate_text(text: str) -> str:
-    """Translate provided text to English using GPT-4o with googletrans fallback."""
+    """Translate provided text to English using GPT-4o."""
     if not text.strip():
         return text
     try:
@@ -340,15 +340,11 @@ async def translate_text(text: str) -> str:
         )
         return response.choices[0].message.content.strip()
     except Exception:
-        pass
-    try:
-        return translator.translate(text, dest='en').text
-    except Exception:
         return text
 
 # New feature: translate moderator replies into arbitrary languages for users
 async def translate_to_language(text: str, language: str) -> str:
-    """Translate provided text to the specified language using GPT-4o with googletrans fallback."""
+    """Translate provided text to the specified language using GPT-4o."""
     if not text.strip():
         return text
     try:
@@ -360,11 +356,6 @@ async def translate_to_language(text: str, language: str) -> str:
             ]
         )
         return response.choices[0].message.content.strip()
-    except Exception:
-        pass
-    try:
-        dest = LANGUAGE_CODES.get(language.lower(), language)
-        return translator.translate(text, dest=dest).text
     except Exception:
         return text
 
