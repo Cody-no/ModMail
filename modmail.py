@@ -16,7 +16,6 @@ import functools
 import dataclasses
 import sqlite3
 import asyncio
-import urllib.request
 import openai
 from dotenv import load_dotenv
 
