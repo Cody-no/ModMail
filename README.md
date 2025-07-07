@@ -1,8 +1,7 @@
 # ModMail
 A modmail bot for Discord.
 
-I originally made this as a custom project for the official Chivalry 2 Discord server, but it is now server-agnostic.
-Although **not** a fork of the widely-used [Modmail bot by kyb3r](https://github.com/kyb3r/modmail), the experience will be very similar.
+A fork of [Tobiwan's modmail](https://github.com/TobiWan54/ModMail)
 
 Message me on Discord if you have any questions, or if you need any help with using it.
 
