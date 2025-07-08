@@ -2,7 +2,7 @@
 * Translated incoming messages to English when relayed to moderators.
 * Added replyTranslate and areplyTranslate commands for sending translated replies.
 * Added OpenAI dependency for translation and AI summarization features.
-* Tokens and API keys now load from a .env file using python-dotenv.
+* Tokens and API keys now load from a modmail.env file using python-dotenv.
 * Corrected OpenAI API calls using AsyncOpenAI client.
 * Initialized OpenAI client with httpx.AsyncClient to avoid proxy errors.
 * Added closet command for closing tickets with translated reasons.
