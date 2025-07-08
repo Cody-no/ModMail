@@ -21,6 +21,7 @@ import openai
 import httpx
 from dotenv import load_dotenv
 import re
+from googletrans import Translator, LANGUAGES
 
 # Load variables from a .env file for token and API access
 load_dotenv()
@@ -359,6 +360,7 @@ async def detect_language(text: str) -> str:
 
 async def translate_text(text: str) -> str:
     """Translate provided text to English using GPT-4o."""
+
     if not text.strip():
         return text
 
@@ -381,6 +383,7 @@ async def translate_text(text: str) -> str:
 # Feature: translate moderator replies into arbitrary languages for users using GPT-4o
 async def translate_to_language(text: str, language: str) -> str:
     """Translate provided text to the specified language using GPT-4o."""
+
     if not text.strip():
         return text
     try:
