@@ -888,6 +888,18 @@ async def close(ctx, *, reason: str = ''):
             pass
 
 
+@bot.command()
+@commands.check(is_helper)
+async def closet(ctx, language: str, *, reason: str = ''):
+    """Closes a ticket and translates the reason for the user."""
+
+    # Translate the closing reason to the requested language
+    translated = await translate_to_language(reason, language)
+
+    # Reuse the existing close command with the translated reason
+    await ctx.invoke(close, reason=translated)
+
+
 @bot.group(invoke_without_command=True, aliases=['snippets'])
 @commands.check(is_helper)
 async def snippet(ctx, name: str):
