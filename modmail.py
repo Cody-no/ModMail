@@ -21,6 +21,7 @@ import openai
 import httpx
 from dotenv import load_dotenv
 import re
+from googletrans import Translator, LANGUAGES
 
 # Load variables from a .env file for token and API access
 load_dotenv()
@@ -90,6 +91,11 @@ config.token = os.getenv('DISCORD_TOKEN', config.token)
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
 http_client = httpx.AsyncClient()
 openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
+
+# Translator setup for fallback translation and language detection
+translator = Translator()
+# Mapping of language names to codes used for googletrans
+LANGUAGE_CODES = {name.lower(): code for code, name in LANGUAGES.items()}
 
 
 try:
@@ -339,10 +345,37 @@ async def send_message(message, text, anon):
     await message.channel.send(embed=channel_embed, files=files_to_send)
 
 # New feature: translate user messages to English for moderators
+# First detect the language using AI, translating only when necessary
+async def detect_language(text: str) -> str:
+    """Identify the language of the given text."""
+    try:
+        response = await openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'Identify the language of the following text. Reply with the language name in English.'
+                },
+                {'role': 'user', 'content': text}
+            ]
+        )
+        return response.choices[0].message.content.strip().lower()
+    except Exception:
+        pass
+    try:
+        return translator.detect(text).lang
+    except Exception:
+        return 'unknown'
+
 async def translate_text(text: str) -> str:
     """Translate provided text to English using GPT-4o with googletrans fallback."""
     if not text.strip():
         return text
+
+    language = await detect_language(text)
+    if language in ('en', 'english'):
+        return text
+
     try:
         response = await openai_client.chat.completions.create(
             model='gpt-4o',
