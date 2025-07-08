@@ -20,6 +20,7 @@ import aiohttp  # used for fetching logs in the search command
 import openai
 import httpx
 from dotenv import load_dotenv
+import re
 
 # Load variables from a .env file for token and API access
 load_dotenv()
@@ -206,6 +207,16 @@ def is_modmail_channel(ctx):
     return isinstance(ctx.channel, discord.TextChannel) and ctx.channel.category.id == config.category_id and ctx.channel.id not in config.channel_ids
 
 
+# Keep the ticket category name updated with the current channel count
+async def update_category_name():
+    category = bot.get_channel(config.category_id)
+    if category:
+        base_name = re.sub(r"\s*\[\d+/50\]$", "", category.name)
+        new_name = f"{base_name} [{len(category.channels)}/50]"
+        if category.name != new_name:
+            await category.edit(name=new_name)
+
+
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
 
@@ -214,6 +225,8 @@ bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
 async def on_ready():
     await bot.wait_until_ready()
     print(f'{bot.user.name} has connected to Discord!')
+    # Ensure category name shows the correct channel count on startup
+    await update_category_name()
 
 
 async def error_handler(error, message=None):
@@ -1188,5 +1201,18 @@ async def eval(ctx, *, body: str):
         else:
             await ctx.send(f'```py\n{value}{ret}\n```')
 
+
+@bot.event
+async def on_guild_channel_create(channel):
+    """Update category name when a new channel is created inside it."""
+    if channel.category_id == config.category_id:
+        await update_category_name()
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    """Update category name when a channel inside it is deleted."""
+    if channel.category_id == config.category_id:
+        await update_category_name()
 
 bot.run(config.token, log_handler=None)

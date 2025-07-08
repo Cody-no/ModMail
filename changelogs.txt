@@ -6,4 +6,5 @@
 * Corrected OpenAI API calls using AsyncOpenAI client.
 * Initialized OpenAI client with httpx.AsyncClient to avoid proxy errors.
 * Added closet command for closing tickets with translated reasons.
+* Category name now reflects the number of channels as [n/50] and updates on creation or deletion.
 
