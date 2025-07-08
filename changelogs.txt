@@ -8,4 +8,5 @@
 * Added closet command for closing tickets with translated reasons.
 * Category name now reflects the number of channels as [n/50] and updates on creation or deletion.
 * Added language detection before translation to avoid unnecessary English translations.
+* Removed googletrans fallback to rely solely on OpenAI for translation.
 
