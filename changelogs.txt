@@ -10,3 +10,4 @@
 * Added language detection before translation to avoid unnecessary English translations.
 
 
+* Removed unused googletrans import.

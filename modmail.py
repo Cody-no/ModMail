@@ -21,7 +21,6 @@ import openai
 import httpx
 from dotenv import load_dotenv
 import re
-from googletrans import Translator, LANGUAGES
 
 # Load variables from a modmail.env file so tokens and API keys can be configured externally
 load_dotenv('modmail.env')
