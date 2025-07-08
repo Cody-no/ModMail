@@ -5,4 +5,5 @@
 * Tokens and API keys now load from a .env file using python-dotenv.
 * Corrected OpenAI API calls using AsyncOpenAI client.
 * Initialized OpenAI client with httpx.AsyncClient to avoid proxy errors.
+* Added closet command for closing tickets with translated reasons.
 
