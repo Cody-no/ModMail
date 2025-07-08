@@ -92,11 +92,6 @@ openai.api_key = os.getenv('OPENAI_API_KEY', '')
 http_client = httpx.AsyncClient()
 openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
 
-# Translator setup for fallback translation and language detection
-translator = Translator()
-# Mapping of language names to codes used for googletrans
-LANGUAGE_CODES = {name.lower(): code for code, name in LANGUAGES.items()}
-
 
 try:
     with open('snippets.json', 'r') as snippets_file:
@@ -361,14 +356,11 @@ async def detect_language(text: str) -> str:
         )
         return response.choices[0].message.content.strip().lower()
     except Exception:
-        pass
-    try:
-        return translator.detect(text).lang
-    except Exception:
         return 'unknown'
 
 async def translate_text(text: str) -> str:
-    """Translate provided text to English using GPT-4o with googletrans fallback."""
+    """Translate provided text to English using GPT-4o."""
+
     if not text.strip():
         return text
 
@@ -386,15 +378,12 @@ async def translate_text(text: str) -> str:
         )
         return response.choices[0].message.content.strip()
     except Exception:
-        pass
-    try:
-        return translator.translate(text, dest='en').text
-    except Exception:
         return text
 
-# New feature: translate moderator replies into arbitrary languages for users
+# Feature: translate moderator replies into arbitrary languages for users using GPT-4o
 async def translate_to_language(text: str, language: str) -> str:
-    """Translate provided text to the specified language using GPT-4o with googletrans fallback."""
+    """Translate provided text to the specified language using GPT-4o."""
+
     if not text.strip():
         return text
     try:
@@ -406,11 +395,6 @@ async def translate_to_language(text: str, language: str) -> str:
             ]
         )
         return response.choices[0].message.content.strip()
-    except Exception:
-        pass
-    try:
-        dest = LANGUAGE_CODES.get(language.lower(), language)
-        return translator.translate(text, dest=dest).text
     except Exception:
         return text
 
