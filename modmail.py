@@ -23,8 +23,8 @@ from dotenv import load_dotenv
 import re
 from googletrans import Translator, LANGUAGES
 
-# Load variables from a .env file for token and API access
-load_dotenv()
+# Load variables from a modmail.env file so tokens and API keys can be configured externally
+load_dotenv('modmail.env')
 class YesNoButtons(discord.ui.View):
     def __init__(self, timeout: int):
         super().__init__(timeout=timeout)
