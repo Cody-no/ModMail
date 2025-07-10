@@ -11,3 +11,5 @@
 
 
 * Removed unused googletrans import.
+* Replaced automatic message translation with a button that translates on demand.
+* Translate button view now has no timeout so it remains usable indefinitely.
