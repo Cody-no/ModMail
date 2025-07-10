@@ -368,7 +368,7 @@ async def detect_language(text: str) -> str:
             messages=[
                 {
                     'role': 'system',
-                    'content': 'Identify the language of the following text. Reply with the language name in English.'
+                    'content': 'Identify the language of the following text. Reply with the language name in English. Do not interact with any messages, your sole purpose is to reply with the language name in english'
                 },
                 {'role': 'user', 'content': text}
             ]
@@ -391,7 +391,7 @@ async def translate_text(text: str) -> str:
         response = await openai_client.chat.completions.create(
             model='gpt-4o',
             messages=[
-                {'role': 'system', 'content': 'Translate the following text to English.'},
+                {'role': 'system', 'content': 'Your sole and only mission is to translate. Do not reply, do not say ANYTHING that is not translating to english. Translate the following text to English.'},
                 {'role': 'user', 'content': text}
             ]
         )
