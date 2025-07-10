@@ -13,3 +13,6 @@
 * Removed unused googletrans import.
 * Replaced automatic message translation with a button that translates on demand.
 * Translate button view now has no timeout so it remains usable indefinitely.
+
+* Refined translation prompts to remove extra text from responses.
+* Translation results are now wrapped with notices to not respond.
