@@ -46,6 +46,26 @@ class UserInput(discord.ui.View):
         self.value = None
 
 
+# Feature: provide a button to translate messages on demand rather than automatically
+class TranslateView(discord.ui.View):
+    """View containing a button that translates a message when pressed."""
+
+    def __init__(self, content: str):
+        # Setting timeout=None ensures the button does not expire
+        super().__init__(timeout=None)
+        self.content = content
+
+    @discord.ui.button(label='Translate', style=discord.ButtonStyle.blurple)
+    async def translate(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        translated = await translate_text(self.content)
+        embed = interaction.message.embeds[0]
+        embed.description = translated
+        if translated != self.content and not any(f.name == 'Original' for f in embed.fields):
+            embed.add_field(name='Original', value=self.content[:1024], inline=False)
+        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.send_message('Translated.', ephemeral=True)
+
+
 class HelpCommand(commands.DefaultHelpCommand):
     def __init__(self):
         super().__init__(command_attrs={'checks': [is_helper]})
@@ -511,11 +531,10 @@ async def on_message(message):
             ticket_create = False
 
         confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
-        translated = await translate_text(message.content)
-        ticket_embed = embed_creator('Message Received', translated, 'g', message.author)
-        if translated != message.content:
-            ticket_embed.add_field(name='Original', value=message.content[:1024], inline=False)
+        ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
         user_embed = embed_creator('Message Sent', message.content, 'g', guild)
+        # Create a translate button view so mods can translate on demand
+        view = TranslateView(message.content) if message.content else None
         files = []
         total_filesize = 0
         attachment_embeds = []
@@ -532,9 +551,9 @@ async def on_message(message):
                 ticket_embed.add_field(name=f'Attachment {n}', value=attachment.url, inline=False)
             user_embed.add_field(name='Attachment(s) Sent Successfully', value=len(message.attachments))
         if total_filesize < guild.filesize_limit and len(files) <= 10:
-            await channel.send(embed=ticket_embed, files=files)
+            await channel.send(embed=ticket_embed, files=files, view=view)
         else:
-            await channel.send(embed=ticket_embed)
+            await channel.send(embed=ticket_embed, view=view)
             for i in range(len(files)):
                 await channel.send(embed=attachment_embeds[i], file=files[i])
         await confirmation_message.edit(embed=user_embed)
