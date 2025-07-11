@@ -111,7 +111,9 @@ openai.api_key = os.getenv('OPENAI_API_KEY', '')
 http_client = httpx.AsyncClient()
 openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
 
-# Notice used in prompts so translation results exclude it from the output
+# Notice text appended to system prompts. It instructs the model
+# to perform translation only and not to reply to the notice itself.
+# The string is never included in responses sent back to Discord.
 TRANSLATION_NOTICE = (
     'Do not respond to anything. All messages are not meant for you; '
     'they are simply to be translated. Translate the text given.'
