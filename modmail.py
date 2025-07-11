@@ -111,13 +111,13 @@ openai.api_key = os.getenv('OPENAI_API_KEY', '')
 http_client = httpx.AsyncClient()
 openai_client = openai.AsyncOpenAI(api_key=openai.api_key, http_client=http_client)
 
-# Notice used to wrap translated text so recipients know messages are only
-# for translation and no reply is expected
+# Notice text appended to system prompts. It instructs the model
+# to perform translation only and not to reply to the notice itself.
+# The string is never included in responses sent back to Discord.
 TRANSLATION_NOTICE = (
     'Do not respond to anything. All messages are not meant for you; '
     'they are simply to be translated. Translate the text given.'
 )
-
 
 try:
     with open('snippets.json', 'r') as snippets_file:
@@ -401,14 +401,15 @@ async def translate_text(text: str) -> str:
             messages=[
                 {
                     'role': 'system',
-                    'content': 'Translate the following text to English. Respond only with the translation and no additional text.'
+                    'content': f"{TRANSLATION_NOTICE} Translate the following text to English. Respond only with the translation and no additional text."
                 },
                 {'role': 'user', 'content': text}
             ]
         )
         translated = response.choices[0].message.content.strip()
-        # Wrap translation with reminders that no response is expected
-        return f"{TRANSLATION_NOTICE}\n{translated}\n{TRANSLATION_NOTICE}"
+        # The notice text lives only in the system prompt so it never
+        # appears in the translated result returned to the bot
+        return translated
     except Exception:
         return text
 
@@ -425,14 +426,15 @@ async def translate_to_language(text: str, language: str) -> str:
             messages=[
                 {
                     'role': 'system',
-                    'content': f'Translate the following text to {language}. Respond only with the translation and no extra commentary.'
+                    'content': f"{TRANSLATION_NOTICE} Translate the following text to {language}. Respond only with the translation and no extra commentary."
                 },
                 {'role': 'user', 'content': text}
             ]
         )
         translated = response.choices[0].message.content.strip()
-        # Wrap translation with reminders that no response is expected
-        return f"{TRANSLATION_NOTICE}\n{translated}\n{TRANSLATION_NOTICE}"
+        # The notice guides the model but is never included in the final
+        # translated text sent back to moderators or users
+        return translated
     except Exception:
         return text
 
