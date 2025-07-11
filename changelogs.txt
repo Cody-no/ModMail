@@ -16,3 +16,6 @@
 
 * Refined translation prompts to remove extra text from responses.
 * Translation results are now wrapped with notices to not respond.
+* Removed notice text from translation results; notice is used only in prompts.
+* Added TRANSLATION_NOTICE constant and inserted it into translation prompts.
+* Clarified comments so the translation notice never appears in output.
