@@ -22,3 +22,6 @@
 * Expanded notice comment to emphasize it is excluded from translations.
 * Added dynamic ticket category management that creates or removes categories when full or empty.
 
+* Added refresh command to manually update the ticket category channel count.
+* Renamed the old refresh command to reloadconfig for reloading the config file.
+
