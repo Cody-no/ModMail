@@ -21,3 +21,6 @@
 * Clarified comments so the translation notice never appears in output.
 * Expanded notice comment to emphasize it is excluded from translations.
 
+* Added refresh command to manually update the ticket category channel count.
+* Renamed the old refresh command to reloadconfig for reloading the config file.
+

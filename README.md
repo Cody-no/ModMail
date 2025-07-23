@@ -72,8 +72,8 @@ is given to the bot owner(s) in the Discord Developer Portal (although they will
 - `anonymous_tickets` (true/false) names ticket channels anonymously, rather than using the name of the user.
 - `send_with_command_only` (true/false) only allows messages to be sent using `!reply` and `!areply`
 
-The `!refresh` command will re-read the config file, so you can change these values without restarting the bot.
-It also resets a few things behind the scenes which may help fix some issues.
+The `!reloadconfig` command will re-read the config file so you can change these values without restarting the bot.
+Use `!refresh` to manually update the ticket category name if the channel count becomes incorrect.
 
 ### Dependancies
 

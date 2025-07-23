@@ -1208,7 +1208,16 @@ async def ping(ctx):
 @bot.command()
 @commands.check(is_helper)
 async def refresh(ctx):
-    """Re-reads the external config file"""
+    """Refresh the ticket category name with the current channel count"""
+
+    await update_category_name()
+    await ctx.message.add_reaction('\u2705')
+
+
+@bot.command(name='reloadconfig')
+@commands.check(is_helper)
+async def reload_config(ctx):
+    """Re-read the external config file"""
 
     with open('config.json', 'r') as file:
         config.update(json.load(file))
