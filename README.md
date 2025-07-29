@@ -43,8 +43,10 @@ and host the script yourself. Oracle Cloud and Google Cloud both have free tiers
 The script requires Python 3.10 or higher and the packages listed under Dependancies.
 
 ### Configuration
-Fill out [config.json](templates/config.json) with your own values, and put it in the same 
+Fill out [config.json](templates/config.json) with your own values, and put it in the same
 directory as [modmail.py](modmail.py). Then run the script, and your bot will be online!
+Create a `modmail.env` file alongside the script and store your `DISCORD_TOKEN` and
+`OPENAI_API_KEY` inside it. These are loaded automatically at runtime.
 
 Snippets are stored in `snippets.json`, the blacklist is stored in `blacklist.json` and ticket logs are indexed in the SQLite database `logs.db`.
 Along with `counter.txt` these are automatically created by the script, so do not delete them.
@@ -53,8 +55,8 @@ I would recommend storing your own external backups, especially of `logs.db` bec
 
 #### config.json
 
-- `token` is your bot account's token from the Discord Developer Portal. This value can be set in a `.env` file.
-- `OPENAI_API_KEY` should also be placed in the `.env` file if you use the AI features.
+- `token` is your bot account's token from the Discord Developer Portal. This value can be set in a `modmail.env` file.
+- `OPENAI_API_KEY` should also be placed in `modmail.env` if you use the AI features.
 - `guild_id` is your server's ID.
 - `category_id` is the ID of the category that tickets to be created in. You will have to create this yourself.
 - `log_channel_id` is the ID of the channel that ticket logs will be sent in.
@@ -86,4 +88,4 @@ The required/working versions of these packages are listed in [requirements.txt]
 [aiohttp](https://github.com/aio-libs/aiohttp) - async HTTP client used for log searches (installed with discord.py)
 
 [openai](https://github.com/openai/openai-python) - used for GPT-4o ticket summaries and message translation
-[python-dotenv](https://github.com/theskumar/python-dotenv) - loads environment variables from a .env file
+[python-dotenv](https://github.com/theskumar/python-dotenv) - loads environment variables from a `modmail.env` file

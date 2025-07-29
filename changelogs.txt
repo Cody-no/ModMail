@@ -20,6 +20,7 @@
 * Added TRANSLATION_NOTICE constant and inserted it into translation prompts.
 * Clarified comments so the translation notice never appears in output.
 * Expanded notice comment to emphasize it is excluded from translations.
+* Documented `modmail.env` usage in README setup instructions.
 
 * Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
 
