@@ -20,5 +20,4 @@
 * Added TRANSLATION_NOTICE constant and inserted it into translation prompts.
 * Clarified comments so the translation notice never appears in output.
 * Expanded notice comment to emphasize it is excluded from translations.
-* Added dynamic ticket category management that creates or removes categories when full or empty.
 

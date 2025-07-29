@@ -149,63 +149,6 @@ with sqlite3.connect('tickets.db') as connection:
 html_sanitiser = bleach.sanitizer.Cleaner()
 html_linkifier = bleach.sanitizer.Cleaner(filters=[functools.partial(bleach.linkifier.LinkifyFilter)])
 
-# Base name shared by all ticket categories. Populated on_ready().
-ticket_base_name = None
-
-def is_ticket_category(category: discord.CategoryChannel) -> bool:
-    """Return True if the category is part of the ticket system."""
-    if ticket_base_name is None:
-        return False
-    name = re.sub(r"\s*\[\d+/50\]$", "", category.name)
-    base = re.sub(r"\s*\d+$", "", name).rstrip()
-    return base == ticket_base_name
-
-
-def category_index(category: discord.CategoryChannel) -> int:
-    """Return the sequential index from the category name."""
-    name = re.sub(r"\s*\[\d+/50\]$", "", category.name)
-    match = re.search(r"(\d+)$", name)
-    return int(match.group(1)) if match else 1
-
-
-async def get_ticket_category(guild: discord.Guild) -> discord.CategoryChannel:
-    """Return a category with space available or create a new one."""
-    categories = [c for c in guild.categories if is_ticket_category(c)]
-    categories.sort(key=category_index)
-    for cat in categories:
-        if len(cat.channels) < 50:
-            return cat
-    index = category_index(categories[-1]) + 1 if categories else 1
-    return await guild.create_category(f'{ticket_base_name} {index}')
-
-
-async def update_category_names():
-    """Update the channel count in all ticket categories."""
-    guild = bot.get_guild(config.guild_id)
-    if guild is None:
-        return
-    for cat in guild.categories:
-        if is_ticket_category(cat):
-            base_name = re.sub(r"\s*\[\d+/50\]$", "", cat.name)
-            new_name = f"{base_name} [{len(cat.channels)}/50]"
-            if cat.name != new_name:
-                await cat.edit(name=new_name)
-
-
-async def cleanup_ticket_categories():
-    """Delete empty ticket categories when the primary has space."""
-    guild = bot.get_guild(config.guild_id)
-    if guild is None:
-        return
-    categories = [c for c in guild.categories if is_ticket_category(c)]
-    categories.sort(key=category_index)
-    if len(categories) <= 1:
-        return
-    primary = categories[0]
-    for cat in categories[1:]:
-        if len(cat.channels) == 0 and len(primary.channels) < 50:
-            await cat.delete()
-
 
 def embed_creator(title, message, colour=None, subject=None, author=None, anon=True, time=False):
     embed = discord.Embed()
@@ -255,11 +198,10 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                     file.write('1')
         else:
             ticket_name = f'{user.name}'
-        ticket_category = await get_ticket_category(guild)
-        channel = await guild.create_text_channel(ticket_name, category=ticket_category)
+        channel = await guild.create_text_channel(ticket_name, category=bot.get_channel(config.category_id))
     except discord.HTTPException as e:
         if 'Contains words not allowed for servers in Server Discovery' in e.text:
-            channel = await guild.create_text_channel('ticket', category=ticket_category)
+            channel = await guild.create_text_channel('ticket', category=bot.get_channel(config.category_id))
         else:
             raise e from None
     with sqlite3.connect('tickets.db') as conn:
@@ -289,16 +231,17 @@ def is_mod(ctx):
 
 
 def is_modmail_channel(ctx):
-    return (
-        isinstance(ctx.channel, discord.TextChannel)
-        and is_ticket_category(ctx.channel.category)
-        and ctx.channel.id not in config.channel_ids
-    )
+    return isinstance(ctx.channel, discord.TextChannel) and ctx.channel.category.id == config.category_id and ctx.channel.id not in config.channel_ids
 
 
 # Keep the ticket category name updated with the current channel count
 async def update_category_name():
-    await update_category_names()
+    category = bot.get_channel(config.category_id)
+    if category:
+        base_name = re.sub(r"\s*\[\d+/50\]$", "", category.name)
+        new_name = f"{base_name} [{len(category.channels)}/50]"
+        if category.name != new_name:
+            await category.edit(name=new_name)
 
 
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
@@ -309,15 +252,8 @@ bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
 async def on_ready():
     await bot.wait_until_ready()
     print(f'{bot.user.name} has connected to Discord!')
-    # Determine the base name used for ticket categories
-    global ticket_base_name
-    category = bot.get_channel(config.category_id)
-    if category:
-        temp = re.sub(r"\s*\[\d+/50\]$", "", category.name)
-        ticket_base_name = re.sub(r"\s*\d+$", "", temp).rstrip()
-    # Ensure all category names show the correct channel count on startup
-    await update_category_names()
-    await cleanup_ticket_categories()
+    # Ensure category name shows the correct channel count on startup
+    await update_category_name()
 
 
 async def error_handler(error, message=None):
@@ -1325,17 +1261,14 @@ async def eval(ctx, *, body: str):
 @bot.event
 async def on_guild_channel_create(channel):
     """Update category name when a new channel is created inside it."""
-    if channel.category and is_ticket_category(channel.category):
-        await update_category_names()
+    if channel.category_id == config.category_id:
+        await update_category_name()
 
 
 @bot.event
 async def on_guild_channel_delete(channel):
     """Update category name when a channel inside it is deleted."""
-    if channel.category_id and channel.guild:
-        category = channel.guild.get_channel(channel.category_id)
-        if category and is_ticket_category(category):
-            await update_category_names()
-            await cleanup_ticket_categories()
+    if channel.category_id == config.category_id:
+        await update_category_name()
 
 bot.run(config.token, log_handler=None)
