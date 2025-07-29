@@ -69,7 +69,7 @@ is given to the bot owner(s) in the Discord Developer Portal (although they will
 - `prefix` is the bot's prefix.
 - `open_message` is the text that users will receive under "Ticket Created" when they open a ticket.
 - `close_message` is the text that users will receive under "Ticket Closed" when a mod closes their ticket.
-- `anonymous_tickets` (true/false) names ticket channels anonymously, rather than using the name of the user.
+- Set `anonymous_tickets` to true to name ticket channels anonymously instead of using the user's name.
 - `send_with_command_only` (true/false) only allows messages to be sent using `!reply` and `!areply`
 
 The `!refresh` command will re-read the config file, so you can change these values without restarting the bot.

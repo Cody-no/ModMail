@@ -21,3 +21,5 @@
 * Clarified comments so the translation notice never appears in output.
 * Expanded notice comment to emphasize it is excluded from translations.
 
+* Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
+
