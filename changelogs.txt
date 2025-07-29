@@ -24,3 +24,6 @@
 
 * Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
 
+* Added refresh command to manually update the ticket category channel count.
+* Renamed the old refresh command to reloadconfig for reloading the config file.
+
