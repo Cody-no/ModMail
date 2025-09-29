@@ -234,7 +234,6 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
             embed=thread_embed,
             auto_archive_duration=duration
         )
-        # Bug fix: unwrap ThreadWithMessage responses so downstream logic always receives a discord.Thread instance.
         thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
     except discord.HTTPException as e:
         if 'Contains words not allowed for servers in Server Discovery' in e.text:
@@ -243,7 +242,6 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                 embed=thread_embed,
                 auto_archive_duration=duration
             )
-            # Bug fix: ensure Server Discovery fallback also unwraps ThreadWithMessage values.
             thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
         else:
             raise e from None
