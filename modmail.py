@@ -1,5 +1,4 @@
 import time
-
 import discord
 from discord.ext import commands
 import bleach
@@ -114,6 +113,7 @@ def normalise_config_keys(data: dict) -> dict:
     if 'category_id' not in data and 'forum_channel_id' in data:
         data['category_id'] = data['forum_channel_id']
     return data
+
 
 
 # Load configuration separately so environments that struggle with nested
@@ -414,6 +414,7 @@ def add_thread_to_group(group_name: str, thread_id: int) -> None:
         conn.commit()
 
 
+
 def get_group_threads(group_name: str) -> list[int]:
     """Return all ticket thread IDs currently tagged with the provided group name."""
 
@@ -656,9 +657,7 @@ async def error_handler(error, message=None):
         except:
             pass
         return
-
     error_channel = get_error_channel()
-
     if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
         'Maximum number of channels in category reached',
         'Maximum number of active threads reached',
@@ -737,6 +736,7 @@ async def close_ticket_thread(
     user_reason: str | None = None,
     original_reason: str | None = None,
     translation_notice: str | None = None
+
 ) -> tuple[bool, str | None]:
     """Close a modmail ticket thread, returning success and an optional error message."""
 
@@ -1848,6 +1848,7 @@ async def aclosetmany(ctx, group_name: str, language: str, *, reason: str = ''):
         language=language,
         extra_fields=[('Language', language)]
     )
+
 
 
 @bot.command()
