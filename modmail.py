@@ -76,6 +76,7 @@ class HelpCommand(commands.DefaultHelpCommand):
         return f'Type {config.prefix}help command for more info on a command.'
 
 
+
 @dataclasses.dataclass
 class Config:
     token: str
@@ -94,6 +95,7 @@ class Config:
     send_with_command_only: bool
     channel_ids: [] = dataclasses.field(init=False)
 
+
     def __post_init__(self):
         self.channel_ids = [self.log_channel_id, self.error_channel_id]
 
@@ -101,6 +103,7 @@ class Config:
         for key, value in new.items():
             setattr(self, key, value)
         self.channel_ids = [self.log_channel_id, self.error_channel_id]
+
 
 
 def normalise_config_keys(data: dict) -> dict:
@@ -113,8 +116,9 @@ def normalise_config_keys(data: dict) -> dict:
     return data
 
 
-with open('config.json', 'r', encoding='utf-8') as config_file:
+with open('config.json', 'r') as config_file:
     config = Config(**normalise_config_keys(json.load(config_file)))
+
 
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
@@ -151,6 +155,7 @@ with sqlite3.connect('logs.db') as connection:
     cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id, timestamp, txt_log_url, htm_log_url)')
     connection.commit()
 
+
 with sqlite3.connect('tickets.db') as connection:
     cursor = connection.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS tickets (user_id, channel_id)')
@@ -163,8 +168,10 @@ with sqlite3.connect('tickets.db') as connection:
     connection.commit()
 
 
+
 html_sanitiser = bleach.sanitizer.Cleaner()
 html_linkifier = bleach.sanitizer.Cleaner(filters=[functools.partial(bleach.linkifier.LinkifyFilter)])
+
 
 
 def embed_creator(title, message, colour=None, subject=None, author=None, anon=True, time=False):
@@ -197,6 +204,17 @@ def embed_creator(title, message, colour=None, subject=None, author=None, anon=T
     return embed
 
 
+def unwrap_created_thread(created_thread):
+    """Return the discord.Thread instance from a ForumChannel.create_thread response."""
+
+    thread_candidate = getattr(created_thread, 'thread', None)
+    if isinstance(thread_candidate, discord.Thread):
+        return thread_candidate
+    if isinstance(created_thread, discord.Thread):
+        return created_thread
+    raise RuntimeError('Forum thread creation returned an unexpected object without a thread.')
+
+
 async def ticket_creator(user: discord.User, guild: discord.Guild):
     forum_channel = bot.get_channel(config.forum_channel_id)
     if forum_channel is None or not isinstance(forum_channel, discord.ForumChannel):
@@ -206,7 +224,8 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
         if config.anonymous_tickets:
             ticket_name = 'ticket 0001'
             try:
-                with open('counter.txt', 'r+', encoding='utf-8') as file:
+                with open('counter.txt', 'r+') as file:
+
                     counter = int(file.read())
                     counter += 1
                     if counter >= 10000:
@@ -215,7 +234,7 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                     file.seek(0)
                     file.write(str(counter))
             except (ValueError, FileNotFoundError):
-                with open('counter.txt', 'w+', encoding='utf-8') as file:
+                with open('counter.txt', 'w+') as file:
                     file.write('1')
         else:
             ticket_name = f'{user.name}'
@@ -234,7 +253,8 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
             embed=thread_embed,
             auto_archive_duration=duration
         )
-        thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
+        # Bug fix: unwrap ThreadWithMessage responses so downstream logic always receives a discord.Thread instance.
+        thread = unwrap_created_thread(created_thread)
     except discord.HTTPException as e:
         if 'Contains words not allowed for servers in Server Discovery' in e.text:
             created_thread = await forum_channel.create_thread(
@@ -242,9 +262,13 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                 embed=thread_embed,
                 auto_archive_duration=duration
             )
-            thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
+            # Bug fix: ensure Server Discovery fallback also unwraps ThreadWithMessage values.
+            thread = unwrap_created_thread(created_thread)
         else:
             raise e from None
+
+    # Bug fix: fetch the created thread to avoid sending to a stale placeholder that triggers Unknown Channel errors.
+    thread = await ensure_thread_ready(thread)
 
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
@@ -254,8 +278,9 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
     log_channel = require_text_channel(config.log_channel_id, 'log')
     await log_channel.send(embed=embed_creator('New Ticket', '', 'g', user))
     # Feature update: keep the forum title in sync with open ticket count for quick moderator awareness.
-    await update_forum_name()
+    schedule_forum_name_update()
     return thread
+
 
 
 def is_helper(ctx):
@@ -264,7 +289,6 @@ def is_helper(ctx):
 
 def is_mod(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.mod_role_id)
-
 
 def is_modmail_channel(obj):
     channel = getattr(obj, 'channel', obj)
@@ -299,10 +323,22 @@ async def update_forum_name():
         curs.execute('SELECT COUNT(*) FROM tickets')
         (open_tickets,) = curs.fetchone()
 
-    base_name = re.sub(r"\s*\[\d+\]$", "", forum_channel.name)
+    base_name = re.sub(r"(?:\s*\[\d+\]|(?:-\d+)+)$", "", forum_channel.name).rstrip('- ')
     new_name = f"{base_name} [{open_tickets}]"
     if forum_channel.name != new_name:
         await forum_channel.edit(name=new_name)
+
+
+def schedule_forum_name_update() -> None:
+    """Run the forum rename task without blocking the caller."""
+
+    async def runner():
+        try:
+            await update_forum_name()
+        except Exception:
+            traceback.print_exc()
+
+    asyncio.create_task(runner())
 
 
 async def resolve_thread(thread_id: int) -> discord.Thread | None:
@@ -321,6 +357,21 @@ async def resolve_thread(thread_id: int) -> discord.Thread | None:
     except (discord.NotFound, discord.HTTPException):
         return None
     return channel if isinstance(channel, discord.Thread) else None
+
+
+async def ensure_thread_ready(thread: discord.Thread) -> discord.Thread:
+    """Fetch and return an up-to-date thread object after creation."""
+
+    resolved_thread = await resolve_thread(thread.id)
+    if resolved_thread is not None:
+        return resolved_thread
+    # Give Discord a moment to register the new thread before retrying.
+    for _ in range(3):
+        await asyncio.sleep(0.25)
+        resolved_thread = await resolve_thread(thread.id)
+        if resolved_thread is not None:
+            return resolved_thread
+    return thread
 
 
 def link_broadcast_thread(aggregator_id: int, user_id: int, thread_id: int) -> None:
@@ -613,6 +664,7 @@ async def dispatch_broadcast_message(
         summary_embed.add_field(name='Failed', value='\n'.join(failed)[:1024], inline=False)
     files = payloads_to_files(attachments)
     await channel.send(embed=summary_embed, files=files)
+
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
 
@@ -623,6 +675,7 @@ async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
     # Ensure category name shows the correct channel count on startup
     await update_forum_name()
+
 
 
 async def error_handler(error, message=None):
@@ -727,6 +780,7 @@ async def send_message(message, text, anon):
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
         user_id = res.fetchone()
+
     try:
         user_id = user_id[0]
         user = bot.get_user(user_id)
@@ -763,6 +817,7 @@ async def send_message(message, text, anon):
         await message.channel.send(
             embed=embed_creator('Failed to Send', f'User has server DMs disabled or has blocked {bot.user.name}.', 'e'))
         return
+
     for index, attachment in enumerate(user_message.attachments):
         channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
     await message.delete()
@@ -892,6 +947,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
         user_id = res.fetchone()
+
     try:
         user_id = user_id[0]
         user = bot.get_user(user_id)
@@ -932,6 +988,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         await message.channel.send(
             embed=embed_creator('Failed to Send', f'User has server DMs disabled or has blocked {bot.user.name}.', 'e'))
         return
+
     for index, attachment in enumerate(user_message.attachments):
         channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
     await message.delete()
@@ -951,6 +1008,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         original_text=text,
         translation_notice=notice
     )
+
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -984,6 +1042,7 @@ async def on_message(message):
 
         guild = bot.get_guild(config.guild_id)
 
+
         with sqlite3.connect('tickets.db') as conn:
             curs = conn.cursor()
             res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (message.author.id, ))
@@ -1012,7 +1071,7 @@ async def on_message(message):
                 await channel.delete()
             except discord.HTTPException:
                 pass
-            await update_forum_name()
+            schedule_forum_name_update()
             channel = None
 
         if channel is None:
@@ -1020,6 +1079,7 @@ async def on_message(message):
             ticket_create = True
         else:
             ticket_create = False
+
 
         confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
         ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
@@ -1049,6 +1109,7 @@ async def on_message(message):
                 await channel.send(embed=attachment_embeds[i], file=files[i])
         await confirmation_message.edit(embed=user_embed)
 
+
         if ticket_create:
             await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
 
@@ -1059,6 +1120,7 @@ async def on_message(message):
 
         if not is_modmail_channel(message):
             return
+
         elif config.send_with_command_only:
             return
         elif len(message.content) > 0 and message.content.startswith(config.prefix):
@@ -1140,6 +1202,7 @@ async def send(ctx, user: discord.User, *, message: str = ''):
         if existing_channel is not None:
             await ctx.send(embed=embed_creator('', f'A ticket for this user already exists: <#{channel_id}>', 'e'))
             return
+
 
     if ctx.guild not in user.mutual_guilds:
         await ctx.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
@@ -1314,6 +1377,7 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         confirmation.add_field(name='Not Included', value=failure_text[:1024], inline=False)
     await ctx.send(embed=confirmation)
 
+
 @bot.command()
 @commands.check(is_helper)
 async def close(ctx, *, reason: str = ''):
@@ -1352,6 +1416,7 @@ async def close(ctx, *, reason: str = ''):
         return
 
     error_message = ('Database Corrupted', 'This ticket is unlikely to be fixable. Would you still like to close and log it?')
+
     try:
         if user_id:
             error_message = ('Invalid User Association', 'This is probably because the user has deleted their account. Would you still like to close and log the ticket?')
@@ -1380,9 +1445,11 @@ async def close(ctx, *, reason: str = ''):
         conn.commit()
     unlink_thread_from_broadcasts(ctx.channel.id)
 
+
     await ctx.send(embed=embed_creator('Closing Ticket...', '', 'b'))
 
     # Logging
+
 
     try:
         channel_messages = [message async for message in ctx.channel.history(limit=1024, oldest_first=True)]
@@ -1561,14 +1628,17 @@ async def close(ctx, *, reason: str = ''):
                                                           discord.File(f'{user_id}.htm',
                                                                        filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')])
 
+
     with sqlite3.connect('logs.db') as conn:
         curs = conn.cursor()
         curs.execute('INSERT INTO logs VALUES (?, ?, ?, ?)',
                      (user_id, int(ctx.channel.created_at.timestamp()), log.attachments[0].url, log.attachments[1].url))
         conn.commit()
 
+
     await ctx.channel.delete()
     await update_forum_name()
+
     os.remove(f'{user_id}.txt')
     os.remove(f'{user_id}.htm')
     if user is not None:
@@ -1831,7 +1901,8 @@ async def ping(ctx):
 async def refresh(ctx):
     """Re-reads the external config file"""
 
-    with open('config.json', 'r', encoding='utf-8') as file:
+    with open('config.json', 'r') as file:
+
         config.update(normalise_config_keys(json.load(file)))
     await ctx.message.add_reaction('\u2705')
 
@@ -1893,5 +1964,6 @@ async def on_thread_delete(thread):
         unlink_thread_from_broadcasts(thread.id)
         unlink_aggregator(thread.id)
         await update_forum_name()
+
 
 bot.run(config.token, log_handler=None)
