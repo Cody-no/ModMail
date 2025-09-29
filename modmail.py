@@ -1,3 +1,4 @@
+
 import time
 
 import discord
@@ -387,16 +388,16 @@ async def ensure_thread_open(thread: discord.Thread) -> discord.Thread:
 
 def add_thread_to_group(group_name: str, thread_id: int) -> None:
     """Record that a ticket thread belongs to a bulk-message group."""
-
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         curs.execute(
+
             'INSERT OR REPLACE INTO group_tags (group_name, thread_id) VALUES (?, ?)',
             (group_name, thread_id)
+
         )
         conn.commit()
-
-
+        
 def get_group_threads(group_name: str) -> list[int]:
     """Return all ticket thread IDs currently tagged with the provided group name."""
 

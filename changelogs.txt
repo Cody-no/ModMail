@@ -39,3 +39,5 @@
 
 * Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
 
+* Fixed config loading to always use UTF-8 so Japanese text and emoji in modmail responses display correctly.
+
