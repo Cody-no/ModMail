@@ -114,8 +114,14 @@ def normalise_config_keys(data: dict) -> dict:
         data['category_id'] = data['forum_channel_id']
     return data
 
+
+
+# Load configuration separately so environments that struggle with nested
+# constructor calls (e.g., Windows newline quirks) avoid syntax issues.
 with open('config.json', 'r', encoding='utf-8') as config_file:
-    config = Config(**normalise_config_keys(json.load(config_file)))
+    config_data = json.load(config_file)
+
+config = Config(**normalise_config_keys(config_data))
 
 
 # Override sensitive values from environment
@@ -651,8 +657,6 @@ async def error_handler(error, message=None):
         except:
             pass
         return
-
-
     error_channel = get_error_channel()
     if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
         'Maximum number of channels in category reached',
@@ -722,7 +726,6 @@ async def error_handler(error, message=None):
             print(tb)
 
 
-
 async def close_ticket_thread(
     thread: discord.Thread,
     moderator: discord.abc.User,
@@ -743,6 +746,7 @@ async def close_ticket_thread(
     for text in (reason, user_reason, original_reason):
         if text and len(text) > 1024:
             return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
+
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread.id,))
@@ -1623,6 +1627,7 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
 @commands.check(is_helper)
 async def replymany(ctx, group_name: str, *, message: str = ''):
     """Reply non-anonymously to every ticket associated with the supplied tag."""
+
     await execute_group_reply(ctx, group_name, message, anon=False, summary_title='Reply Many')
 
 
@@ -1724,6 +1729,7 @@ async def execute_group_close(
         original_reason = reason
     elif language:
         translation_notice = None
+
     closed: list[str] = []
     failures: list[str] = []
 
