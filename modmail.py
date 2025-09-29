@@ -76,6 +76,7 @@ class HelpCommand(commands.DefaultHelpCommand):
         return f'Type {config.prefix}help command for more info on a command.'
 
 
+
 @dataclasses.dataclass
 class Config:
     token: str
@@ -94,6 +95,7 @@ class Config:
     send_with_command_only: bool
     channel_ids: [] = dataclasses.field(init=False)
 
+
     def __post_init__(self):
         self.channel_ids = [self.log_channel_id, self.error_channel_id]
 
@@ -101,6 +103,7 @@ class Config:
         for key, value in new.items():
             setattr(self, key, value)
         self.channel_ids = [self.log_channel_id, self.error_channel_id]
+
 
 
 def normalise_config_keys(data: dict) -> dict:
@@ -115,6 +118,7 @@ def normalise_config_keys(data: dict) -> dict:
 
 with open('config.json', 'r') as config_file:
     config = Config(**normalise_config_keys(json.load(config_file)))
+
 
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
@@ -131,25 +135,26 @@ TRANSLATION_NOTICE = (
 )
 
 try:
-    with open('snippets.json', 'r') as snippets_file:
+    with open('snippets.json', 'r', encoding='utf-8') as snippets_file:
         snippets = json.load(snippets_file)
 except FileNotFoundError:
     snippets = {}
-    with open('snippets.json', 'w') as snippets_file:
-        json.dump(snippets, snippets_file)
+    with open('snippets.json', 'w', encoding='utf-8') as snippets_file:
+        json.dump(snippets, snippets_file, ensure_ascii=False)
 
 try:
-    with open('blacklist.json', 'r') as blacklist_file:
+    with open('blacklist.json', 'r', encoding='utf-8') as blacklist_file:
         blacklist_list = json.load(blacklist_file)
 except FileNotFoundError:
     blacklist = []
-    with open('blacklist.json', 'w') as blacklist_file:
-        json.dump(blacklist, blacklist_file)
+    with open('blacklist.json', 'w', encoding='utf-8') as blacklist_file:
+        json.dump(blacklist, blacklist_file, ensure_ascii=False)
 
 with sqlite3.connect('logs.db') as connection:
     cursor = connection.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id, timestamp, txt_log_url, htm_log_url)')
     connection.commit()
+
 
 with sqlite3.connect('tickets.db') as connection:
     cursor = connection.cursor()
@@ -163,8 +168,10 @@ with sqlite3.connect('tickets.db') as connection:
     connection.commit()
 
 
+
 html_sanitiser = bleach.sanitizer.Cleaner()
 html_linkifier = bleach.sanitizer.Cleaner(filters=[functools.partial(bleach.linkifier.LinkifyFilter)])
+
 
 
 def embed_creator(title, message, colour=None, subject=None, author=None, anon=True, time=False):
@@ -218,6 +225,7 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
             ticket_name = 'ticket 0001'
             try:
                 with open('counter.txt', 'r+') as file:
+
                     counter = int(file.read())
                     counter += 1
                     if counter >= 10000:
@@ -274,13 +282,13 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
     return thread
 
 
+
 def is_helper(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.helper_role_id)
 
 
 def is_mod(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.mod_role_id)
-
 
 def is_modmail_channel(obj):
     channel = getattr(obj, 'channel', obj)
@@ -656,6 +664,7 @@ async def dispatch_broadcast_message(
         summary_embed.add_field(name='Failed', value='\n'.join(failed)[:1024], inline=False)
     files = payloads_to_files(attachments)
     await channel.send(embed=summary_embed, files=files)
+
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
 
@@ -666,6 +675,7 @@ async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
     # Ensure category name shows the correct channel count on startup
     await update_forum_name()
+
 
 
 async def error_handler(error, message=None):
@@ -770,6 +780,7 @@ async def send_message(message, text, anon):
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
         user_id = res.fetchone()
+
     try:
         user_id = user_id[0]
         user = bot.get_user(user_id)
@@ -806,6 +817,7 @@ async def send_message(message, text, anon):
         await message.channel.send(
             embed=embed_creator('Failed to Send', f'User has server DMs disabled or has blocked {bot.user.name}.', 'e'))
         return
+
     for index, attachment in enumerate(user_message.attachments):
         channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
     await message.delete()
@@ -935,6 +947,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
         user_id = res.fetchone()
+
     try:
         user_id = user_id[0]
         user = bot.get_user(user_id)
@@ -975,6 +988,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         await message.channel.send(
             embed=embed_creator('Failed to Send', f'User has server DMs disabled or has blocked {bot.user.name}.', 'e'))
         return
+
     for index, attachment in enumerate(user_message.attachments):
         channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
     await message.delete()
@@ -994,6 +1008,7 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         original_text=text,
         translation_notice=notice
     )
+
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -1026,6 +1041,7 @@ async def on_message(message):
             return
 
         guild = bot.get_guild(config.guild_id)
+
 
         with sqlite3.connect('tickets.db') as conn:
             curs = conn.cursor()
@@ -1064,6 +1080,7 @@ async def on_message(message):
         else:
             ticket_create = False
 
+
         confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
         ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
         user_embed = embed_creator('Message Sent', message.content, 'g', guild)
@@ -1092,6 +1109,7 @@ async def on_message(message):
                 await channel.send(embed=attachment_embeds[i], file=files[i])
         await confirmation_message.edit(embed=user_embed)
 
+
         if ticket_create:
             await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
 
@@ -1102,6 +1120,7 @@ async def on_message(message):
 
         if not is_modmail_channel(message):
             return
+
         elif config.send_with_command_only:
             return
         elif len(message.content) > 0 and message.content.startswith(config.prefix):
@@ -1183,6 +1202,7 @@ async def send(ctx, user: discord.User, *, message: str = ''):
         if existing_channel is not None:
             await ctx.send(embed=embed_creator('', f'A ticket for this user already exists: <#{channel_id}>', 'e'))
             return
+
 
     if ctx.guild not in user.mutual_guilds:
         await ctx.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
@@ -1357,6 +1377,7 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         confirmation.add_field(name='Not Included', value=failure_text[:1024], inline=False)
     await ctx.send(embed=confirmation)
 
+
 @bot.command()
 @commands.check(is_helper)
 async def close(ctx, *, reason: str = ''):
@@ -1395,6 +1416,7 @@ async def close(ctx, *, reason: str = ''):
         return
 
     error_message = ('Database Corrupted', 'This ticket is unlikely to be fixable. Would you still like to close and log it?')
+
     try:
         if user_id:
             error_message = ('Invalid User Association', 'This is probably because the user has deleted their account. Would you still like to close and log the ticket?')
@@ -1423,9 +1445,11 @@ async def close(ctx, *, reason: str = ''):
         conn.commit()
     unlink_thread_from_broadcasts(ctx.channel.id)
 
+
     await ctx.send(embed=embed_creator('Closing Ticket...', '', 'b'))
 
     # Logging
+
 
     try:
         channel_messages = [message async for message in ctx.channel.history(limit=1024, oldest_first=True)]
@@ -1433,7 +1457,7 @@ async def close(ctx, *, reason: str = ''):
         channel_messages = []
     thread_messages = []
 
-    with open(f'{user_id}.txt', 'w') as txt_log:
+    with open(f'{user_id}.txt', 'w', encoding='utf-8') as txt_log:
         for message in channel_messages:
             if len(message.embeds) == 1:
 
@@ -1462,7 +1486,7 @@ async def close(ctx, *, reason: str = ''):
             txt_log.write(f'\n[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name}: '
                           f'{message.content}')
 
-    with open(f'{user_id}.htm', 'w') as htm_log:
+    with open(f'{user_id}.htm', 'w', encoding='utf-8') as htm_log:
         htm_log.write(
             '''
 <!doctype html>
@@ -1576,7 +1600,7 @@ async def close(ctx, *, reason: str = ''):
     # New feature: uses GPT-4o to summarise the ticket for moderators
     summary = None
     try:
-        with open(f'{user_id}.txt') as summary_file:
+        with open(f'{user_id}.txt', 'r', encoding='utf-8') as summary_file:
             transcript = summary_file.read()
         if transcript.strip():
             response = await openai_client.chat.completions.create(
@@ -1604,14 +1628,17 @@ async def close(ctx, *, reason: str = ''):
                                                           discord.File(f'{user_id}.htm',
                                                                        filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')])
 
+
     with sqlite3.connect('logs.db') as conn:
         curs = conn.cursor()
         curs.execute('INSERT INTO logs VALUES (?, ?, ?, ?)',
                      (user_id, int(ctx.channel.created_at.timestamp()), log.attachments[0].url, log.attachments[1].url))
         conn.commit()
 
+
     await ctx.channel.delete()
     await update_forum_name()
+
     os.remove(f'{user_id}.txt')
     os.remove(f'{user_id}.htm')
     if user is not None:
@@ -1696,8 +1723,8 @@ async def add(ctx, name: str, *, content: str):
         return
 
     snippets.update({name: content})
-    with open('snippets.json', 'w') as file:
-        json.dump(snippets, file)
+    with open('snippets.json', 'w', encoding='utf-8') as file:
+        json.dump(snippets, file, ensure_ascii=False)
     embed = embed_creator('Snippet Added', '', 'b')
     embed.add_field(name='Name', value=name)
     embed.add_field(name='Content', value=content, inline=False)
@@ -1711,8 +1738,8 @@ async def edit(ctx, name: str, *, content: str):
     name = name.lower()
     if name in snippets:
         snippets.update({name: content})
-        with open('snippets.json', 'w') as file:
-            json.dump(snippets, file)
+        with open('snippets.json', 'w', encoding='utf-8') as file:
+            json.dump(snippets, file, ensure_ascii=False)
         embed = embed_creator('Snippet Edited', '', 'b')
         embed.add_field(name='Name', value=name)
         embed.add_field(name='Content', value=content, inline=False)
@@ -1728,8 +1755,8 @@ async def remove(ctx, name: str):
     name = name.lower()
     if name in snippets:
         content = snippets.pop(name)
-        with open('snippets.json', 'w') as file:
-            json.dump(snippets, file)
+        with open('snippets.json', 'w', encoding='utf-8') as file:
+            json.dump(snippets, file, ensure_ascii=False)
         embed = embed_creator('Snippet Removed', '', 'b')
         embed.add_field(name='Name', value=name)
         embed.add_field(name='Content', value=content, inline=False)
@@ -1794,8 +1821,8 @@ async def add(ctx, user: discord.User, *, reason: str = ''):
         await confirmation.edit(embed=embed_creator('', 'Blacklisting cancelled by moderator.', 'b'), view=None)
         return
     blacklist_list.append(user.id)
-    with open('blacklist.json', 'w') as file:
-        json.dump(blacklist_list, file)
+    with open('blacklist.json', 'w', encoding='utf-8') as file:
+        json.dump(blacklist_list, file, ensure_ascii=False)
 
     embed_user = embed_creator('Access Revoked', f'Your access to {bot.user.name} has been revoked by the moderators. You will no longer be able to send messages here.', 'r', ctx.guild)
     confirmation_msg = f'**{user}** has been blacklisted. They will no longer be able to message {bot.user.name}. User notified by direct message.'
@@ -1821,8 +1848,8 @@ async def remove(ctx, user_id: int):
 
     if user_id in blacklist_list:
         blacklist_list.remove(user_id)
-        with open('blacklist.json', 'w') as file:
-            json.dump(blacklist_list, file)
+        with open('blacklist.json', 'w', encoding='utf-8') as file:
+            json.dump(blacklist_list, file, ensure_ascii=False)
         await ctx.send(embed=embed_creator('Blacklist Updated', f'User with ID `{user_id}` has been un-blacklisted. They can now message {bot.user.name}.', 'b'))
     else:
         await ctx.send(embed=embed_creator('', f'User with ID `{user_id}` is not blacklisted.', 'e'))
@@ -1875,6 +1902,7 @@ async def refresh(ctx):
     """Re-reads the external config file"""
 
     with open('config.json', 'r') as file:
+
         config.update(normalise_config_keys(json.load(file)))
     await ctx.message.add_reaction('\u2705')
 
@@ -1936,5 +1964,6 @@ async def on_thread_delete(thread):
         unlink_thread_from_broadcasts(thread.id)
         unlink_aggregator(thread.id)
         await update_forum_name()
+
 
 bot.run(config.token, log_handler=None)
