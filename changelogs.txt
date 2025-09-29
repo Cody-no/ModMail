@@ -1,4 +1,11 @@
 
+* Added shared group-reply helper and expanded the command set with `!areplymany`, `!replytmany`, and `!areplytmany` for anonymous and translated follow-ups.
+* Introduced `!aclosemany`, `!clostmany`/`!closetmany`, and `!aclosetmany` so bulk closures can be anonymous or translated while keeping forum tags tidy.
+* Hardened the error handler to skip missing error channels gracefully and ensure the owner always receives stack traces.
+* Forced `config.json` to load with UTF-8 so automated ticket messages preserve emoji and other non-ASCII characters.
+* Delayed temporary tag cleanup until after ticket deletion and report failures so moderators know when manual intervention is required.
+* Documented the `!sendmany`, `!replymany`, and `!closemany` group workflow in the README so moderators know how to use the new commands.
+
 * Removed the broadcast forum workflow and its commands in favor of simpler group-tag automation.
 * Added `!sendmany`, `!replymany`, and `!closemany` commands for sending, replying, and closing groups of tickets via temporary tags.
 * Persisted group tag membership in the database and clean up tags automatically when tickets close.

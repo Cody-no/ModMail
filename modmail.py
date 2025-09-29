@@ -1,6 +1,4 @@
-
 import time
-
 import discord
 from discord.ext import commands
 import bleach
@@ -116,9 +114,8 @@ def normalise_config_keys(data: dict) -> dict:
         data['category_id'] = data['forum_channel_id']
     return data
 
-
-with open('config.json', 'r') as config_file:
-    config = Config(**normalise_config_keys(json.load(config_file)))
+with open('config.json', 'r', encoding='utf-8') as config_file:
+normalise_config_keys(json.load(config_file)))
 
 
 # Override sensitive values from environment
@@ -312,6 +309,19 @@ def require_text_channel(channel_id: int, purpose: str) -> discord.TextChannel:
     raise RuntimeError(f'The {purpose} channel (ID {channel_id}) must be a regular text channel, not {channel.__class__.__name__}.')
 
 
+def get_error_channel() -> discord.TextChannel | None:
+    """Return the configured error channel when available without raising."""
+
+    channel = bot.get_channel(config.error_channel_id)
+    if channel is None:
+        guild = bot.get_guild(config.guild_id)
+        if guild is not None:
+            channel = guild.get_channel(config.error_channel_id)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    return None
+
+
 # Keep the ticket category name updated with the current channel count
 async def update_forum_name():
     """Rename the modmail forum to show the number of active ticket threads."""
@@ -388,16 +398,17 @@ async def ensure_thread_open(thread: discord.Thread) -> discord.Thread:
 
 def add_thread_to_group(group_name: str, thread_id: int) -> None:
     """Record that a ticket thread belongs to a bulk-message group."""
+
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         curs.execute(
-
             'INSERT OR REPLACE INTO group_tags (group_name, thread_id) VALUES (?, ?)',
             (group_name, thread_id)
-
         )
         conn.commit()
-        
+
+
+
 def get_group_threads(group_name: str) -> list[int]:
     """Return all ticket thread IDs currently tagged with the provided group name."""
 
@@ -468,13 +479,14 @@ async def apply_group_tag(thread: discord.Thread, tag: discord.ForumTag) -> None
     await thread.edit(applied_tags=current_tags)
 
 
-async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.ForumTag) -> None:
-    """Attempt to remove the provided forum tag, ignoring API errors."""
+async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.ForumTag) -> bool:
+    """Attempt to remove the provided forum tag and report success."""
 
     try:
         await forum_channel.delete_tag(tag)
+        return True
     except discord.HTTPException:
-        pass
+        return False
 
 
 async def deliver_modmail_payload(
@@ -640,19 +652,22 @@ async def error_handler(error, message=None):
             pass
         return
 
+
+    error_channel = get_error_channel()
     if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
         'Maximum number of channels in category reached',
         'Maximum number of active threads reached',
         'Maximum number of active private threads reached'
     )):
-        await bot.get_channel(config.error_channel_id).send(
-            embed=embed_creator(
-                'Inbox Full',
-                f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of active threads in the forum has been reached.',
-                'e',
-                author=message.author
+        if error_channel is not None:
+            await error_channel.send(
+                embed=embed_creator(
+                    'Inbox Full',
+                    f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of active threads in the forum has been reached.',
+                    'e',
+                    author=message.author
+                )
             )
-        )
         try:
             await message.channel.send(
                 embed=embed_creator(
@@ -682,14 +697,30 @@ async def error_handler(error, message=None):
         embed = None
 
     tb = "".join(traceback.format_exception(error))
+    owner = bot.get_user(config.bot_owner_id)
+    if owner is None:
+        try:
+            owner = await bot.fetch_user(config.bot_owner_id)
+        except discord.HTTPException:
+            owner = None
+
     if len(tb) > 2000:
-        await bot.get_user(config.bot_owner_id).send(
-            file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
-        await bot.get_channel(config.error_channel_id).send(
-            file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        if owner is not None:
+            await owner.send(
+                file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        if error_channel is not None:
+            await error_channel.send(
+                file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        else:
+            print(tb)
     else:
-        await bot.get_user(config.bot_owner_id).send(f'```py\n{tb}```', embed=embed)
-        await bot.get_channel(config.error_channel_id).send(f'```py\n{tb}```', embed=embed)
+        if owner is not None:
+            await owner.send(f'```py\n{tb}```', embed=embed)
+        if error_channel is not None:
+            await error_channel.send(f'```py\n{tb}```', embed=embed)
+        else:
+            print(tb)
+
 
 
 async def close_ticket_thread(
@@ -697,16 +728,21 @@ async def close_ticket_thread(
     moderator: discord.abc.User,
     reason: str = '',
     *,
-    skip_confirmation: bool = False
+    skip_confirmation: bool = False,
+    log_anon: bool = False,
+    user_reason: str | None = None,
+    original_reason: str | None = None,
+    translation_notice: str | None = None
+
 ) -> tuple[bool, str | None]:
     """Close a modmail ticket thread, returning success and an optional error message."""
 
     if not isinstance(thread, discord.Thread) or thread.parent_id != config.forum_channel_id:
         return False, 'This channel is not a valid ticket.'
 
-    if len(reason) > 1024:
-        return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
-
+    for text in (reason, user_reason, original_reason):
+        if text and len(text) > 1024:
+            return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread.id,))
@@ -870,10 +906,19 @@ async def close_ticket_thread(
 
     guild = thread.guild or bot.get_guild(config.guild_id)
     embed_user = embed_creator('Ticket Closed', config.close_message, 'b', guild, time=True)
-    embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=False)
+    embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=log_anon)
+
+    final_user_reason = user_reason if user_reason is not None else reason
+    if final_user_reason:
+        embed_user.add_field(name='Reason', value=final_user_reason, inline=False)
     if reason:
-        embed_user.add_field(name='Reason', value=reason)
-        embed_guild.add_field(name='Reason', value=reason)
+        embed_guild.add_field(name='Reason', value=reason, inline=False)
+    if original_reason and original_reason != final_user_reason:
+        embed_user.add_field(name='Original Reason', value=original_reason, inline=False)
+        embed_guild.add_field(name='Original Reason', value=original_reason, inline=False)
+    if translation_notice:
+        icon_url = embed_user.footer.icon_url if embed_user.footer else None
+        embed_user.set_footer(text=translation_notice, icon_url=icon_url)
 
     summary = None
     try:
@@ -1355,6 +1400,118 @@ async def send(ctx, user: discord.User, *, message: str = ''):
     await ctx.channel.send(embed=embed_creator('New Message Sent', f'Ticket: {ticket_channel.mention}', 'r', time=False))
 
 
+# Feature: centralise group replies so variants (anon/translated) reuse the same workflow.
+async def execute_group_reply(
+    ctx: commands.Context,
+    group_name: str,
+    message: str,
+    *,
+    anon: bool,
+    summary_title: str,
+    language: str | None = None,
+    extra_fields: list[tuple[str, str]] | None = None
+) -> None:
+    """Shared implementation for replymany-style commands."""
+
+    cleaned_group = group_name.strip()
+    if not cleaned_group:
+        await ctx.send(embed=embed_creator('', 'Provide the group name you want to reply to.', 'e'))
+        return
+
+    thread_ids = get_group_threads(cleaned_group)
+    if not thread_ids:
+        await ctx.send(embed=embed_creator('', f'No tickets are tracked for `{cleaned_group}`.', 'e'))
+        return
+
+    if not message and not ctx.message.attachments:
+        await ctx.send(embed=embed_creator('', 'Provide a message or at least one attachment to send.', 'e'))
+        return
+
+    try:
+        attachments = await gather_attachment_payloads(ctx.message.attachments, 8000000)
+    except ValueError as attachment_name:
+        await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
+        return
+
+    outbound_text = message or '\u200b'
+    original_text = None
+    translation_notice = None
+    if language:
+        if message:
+            outbound_text = await translate_to_language(message, language)
+            translation_notice = await get_translation_notice(language)
+            original_text = message
+        else:
+            outbound_text = '\u200b'
+
+    delivered: list[str] = []
+    failures: list[str] = []
+
+    for thread_id in thread_ids:
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            remove_thread_from_groups(thread_id)
+            failures.append(f'Ticket thread `{thread_id}` no longer exists.')
+            continue
+
+        with sqlite3.connect('tickets.db') as conn:
+            curs = conn.cursor()
+            res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread_id,))
+            row = res.fetchone()
+
+        if row is None:
+            remove_thread_from_groups(thread_id)
+            failures.append(f'{thread.mention}: not linked to a user.')
+            continue
+
+        user_id = row[0]
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        except discord.HTTPException:
+            failures.append(f'{thread.mention}: unable to fetch user `{user_id}`.')
+            continue
+
+        try:
+            thread = await ensure_thread_open(thread)
+        except discord.HTTPException:
+            failures.append(f'{thread.mention}: cannot reopen thread.')
+            continue
+
+        success, error = await deliver_modmail_payload(
+            user,
+            thread,
+            thread.guild or ctx.guild,
+            ctx.author,
+            outbound_text,
+            anon,
+            attachments,
+            original_text=original_text,
+            translation_notice=translation_notice if original_text else None,
+        )
+        if success:
+            delivered.append(thread.mention)
+        else:
+            failures.append(f'{thread.mention}: {error}')
+
+    summary = embed_creator(
+        summary_title,
+        f'Sent to {len(delivered)} ticket(s).',
+        'g' if not failures else 'b',
+        ctx.guild,
+        ctx.author,
+        anon=False
+    )
+    if delivered:
+        summary.add_field(name='Updated Tickets', value='\n'.join(delivered)[:1024], inline=False)
+    if failures:
+        summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
+    if extra_fields:
+        for name, value in extra_fields:
+            summary.add_field(name=name, value=value, inline=False)
+
+    await ctx.send(embed=summary)
+
+
 # Feature: sendmany sends a shared message to several users and tags their tickets for follow-up management.
 @bot.command()
 @commands.guild_only()
@@ -1466,88 +1623,67 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
 @commands.check(is_helper)
 async def replymany(ctx, group_name: str, *, message: str = ''):
     """Reply non-anonymously to every ticket associated with the supplied tag."""
-
-    cleaned_group = group_name.strip()
-    if not cleaned_group:
-        await ctx.send(embed=embed_creator('', 'Provide the group name you want to reply to.', 'e'))
-        return
-
-    thread_ids = get_group_threads(cleaned_group)
-    if not thread_ids:
-        await ctx.send(embed=embed_creator('', f'No tickets are tracked for `{cleaned_group}`.', 'e'))
-        return
-
-    if not message and not ctx.message.attachments:
-        await ctx.send(embed=embed_creator('', 'Provide a message or at least one attachment to send.', 'e'))
-        return
-
-    try:
-        attachments = await gather_attachment_payloads(ctx.message.attachments, 8000000)
-    except ValueError as attachment_name:
-        await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
-        return
-
-    delivered: list[str] = []
-    failures: list[str] = []
-
-    for thread_id in thread_ids:
-        thread = await resolve_thread(thread_id)
-        if thread is None:
-            remove_thread_from_groups(thread_id)
-            failures.append(f'Ticket thread `{thread_id}` no longer exists.')
-            continue
-
-        with sqlite3.connect('tickets.db') as conn:
-            curs = conn.cursor()
-            res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread_id,))
-            row = res.fetchone()
-
-        if row is None:
-            remove_thread_from_groups(thread_id)
-            failures.append(f'{thread.mention}: not linked to a user.')
-            continue
-
-        user_id = row[0]
-        try:
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-        except discord.HTTPException:
-            failures.append(f'{thread.mention}: unable to fetch user `{user_id}`.')
-            continue
-
-        try:
-            thread = await ensure_thread_open(thread)
-        except discord.HTTPException:
-            failures.append(f'{thread.mention}: cannot reopen thread.')
-            continue
-
-        success, error = await deliver_modmail_payload(
-            user,
-            thread,
-            thread.guild or ctx.guild,
-            ctx.author,
-            message or '\u200b',
-            False,
-            attachments,
-        )
-        if success:
-            delivered.append(thread.mention)
-        else:
-            failures.append(f'{thread.mention}: {error}')
-
-    summary = embed_creator('Reply Many', f'Sent to {len(delivered)} ticket(s).', 'g' if not failures else 'b', ctx.guild, ctx.author, anon=False)
-    if delivered:
-        summary.add_field(name='Updated Tickets', value='\n'.join(delivered)[:1024], inline=False)
-    if failures:
-        summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
-    await ctx.send(embed=summary)
+    await execute_group_reply(ctx, group_name, message, anon=False, summary_title='Reply Many')
 
 
-# Feature: closemany bulk-closes tagged tickets and removes the temporary forum tag afterwards.
+# Feature: provide an anonymous variant of replymany for sensitive moderator messaging.
 @bot.command()
 @commands.guild_only()
 @commands.check(is_helper)
-async def closemany(ctx, group_name: str, *, reason: str = ''):
-    """Close every ticket associated with the supplied group tag and remove the tag."""
+async def areplymany(ctx, group_name: str, *, message: str = ''):
+    """Reply anonymously to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(ctx, group_name, message, anon=True, summary_title='Anonymous Reply Many')
+
+
+# Feature: translate bulk replies so teams can answer in a requested language.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def replytmany(ctx, group_name: str, language: str, *, message: str = ''):
+    """Reply in a translated language to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(
+        ctx,
+        group_name,
+        message,
+        anon=False,
+        summary_title='Translated Reply Many',
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
+
+# Feature: anonymous translated bulk replies for privacy-conscious follow-ups.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def areplytmany(ctx, group_name: str, language: str, *, message: str = ''):
+    """Reply anonymously in another language to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(
+        ctx,
+        group_name,
+        message,
+        anon=True,
+        summary_title='Anonymous Translated Reply Many',
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
+
+# Feature: centralise closemany variants for anonymous and translated clean-up flows.
+async def execute_group_close(
+    ctx: commands.Context,
+    group_name: str,
+    reason: str,
+    *,
+    summary_title: str,
+    log_anon: bool = False,
+    language: str | None = None,
+    extra_fields: list[tuple[str, str]] | None = None
+) -> None:
+    """Shared implementation for closemany-style commands."""
 
     cleaned_group = group_name.strip()
     if not cleaned_group:
@@ -1575,6 +1711,19 @@ async def closemany(ctx, group_name: str, *, reason: str = ''):
             tag = candidate
             break
 
+    user_reason_override: str | None = None
+    original_reason: str | None = None
+    translation_notice: str | None = None
+    if language and reason:
+        translated_reason = await translate_to_language(reason, language)
+        if len(translated_reason) > 1024:
+            await ctx.send(embed=embed_creator('', 'Translated reason too long: the maximum length is 1024 characters.', 'e'))
+            return
+        translation_notice = await get_translation_notice(language)
+        user_reason_override = translated_reason
+        original_reason = reason
+    elif language:
+        translation_notice = None
     closed: list[str] = []
     failures: list[str] = []
 
@@ -1585,22 +1734,115 @@ async def closemany(ctx, group_name: str, *, reason: str = ''):
             failures.append(f'Ticket thread `{thread_id}` no longer exists.')
             continue
 
-        success, error = await close_ticket_thread(thread, ctx.author, reason, skip_confirmation=True)
+        success, error = await close_ticket_thread(
+            thread,
+            ctx.author,
+            reason,
+            skip_confirmation=True,
+            log_anon=log_anon,
+            user_reason=user_reason_override,
+            original_reason=original_reason,
+            translation_notice=translation_notice if user_reason_override else None
+        )
         if success:
             closed.append(f'`{thread_id}`')
         elif error:
             failures.append(f'{thread.mention}: {error}')
 
     remove_group(cleaned_group)
-    if tag is not None:
-        await delete_group_tag(forum_channel, tag)
 
-    summary = embed_creator('Close Many', f'Closed {len(closed)} ticket(s).', 'g' if not failures else 'b', ctx.guild, ctx.author, anon=False)
+    if tag is not None:
+        await asyncio.sleep(1)
+        try:
+            refreshed_forum = await require_forum_channel()
+        except RuntimeError:
+            refreshed_forum = None
+        if refreshed_forum is not None:
+            refreshed_tag = None
+            for candidate in refreshed_forum.available_tags:
+                if candidate.name.lower() == cleaned_group.lower():
+                    refreshed_tag = candidate
+                    break
+            if refreshed_tag is not None:
+                deleted = await delete_group_tag(refreshed_forum, refreshed_tag)
+                if not deleted:
+                    failures.append(f'Failed to delete tag `{cleaned_group}`; please remove it manually.')
+        else:
+            failures.append(f'Unable to confirm deletion for tag `{cleaned_group}`.')
+
+    summary = embed_creator(
+        summary_title,
+        f'Closed {len(closed)} ticket(s).',
+        'g' if not failures else 'b',
+        ctx.guild,
+        ctx.author,
+        anon=False
+    )
     if closed:
         summary.add_field(name='Closed Tickets', value='\n'.join(closed)[:1024], inline=False)
     if failures:
         summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
+    if extra_fields:
+        for name, value in extra_fields:
+            summary.add_field(name=name, value=value, inline=False)
+
     await ctx.send(embed=summary)
+
+
+# Feature: closemany bulk-closes tagged tickets and removes the temporary forum tag afterwards.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def closemany(ctx, group_name: str, *, reason: str = ''):
+    """Close every ticket associated with the supplied group tag and remove the tag."""
+
+    await execute_group_close(ctx, group_name, reason, summary_title='Close Many')
+
+
+# Feature: anonymous bulk closing for moderators who need additional privacy.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def aclosemany(ctx, group_name: str, *, reason: str = ''):
+    """Close group-tagged tickets while hiding the acting moderator in logs."""
+
+    await execute_group_close(ctx, group_name, reason, summary_title='Anonymous Close Many', log_anon=True)
+
+
+# Feature: translated closing reasons for all tagged tickets in a group.
+@bot.command(name='clostmany', aliases=['closetmany'])
+@commands.guild_only()
+@commands.check(is_helper)
+async def clostmany(ctx, group_name: str, language: str, *, reason: str = ''):
+    """Close group-tagged tickets with a translated reason for users."""
+
+    await execute_group_close(
+        ctx,
+        group_name,
+        reason,
+        summary_title='Translated Close Many',
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
+
+# Feature: anonymous translated closures to pair privacy with localisation.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def aclosetmany(ctx, group_name: str, language: str, *, reason: str = ''):
+    """Close group-tagged tickets anonymously while translating the reason."""
+
+    await execute_group_close(
+        ctx,
+        group_name,
+        reason,
+        summary_title='Anonymous Translated Close Many',
+        log_anon=True,
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
 
 
 @bot.command()
