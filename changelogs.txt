@@ -7,6 +7,7 @@
 * Added GPT-4o ticket summary in closed ticket logs.
 * Translated incoming messages to English when relayed to moderators.
 * Added replyTranslate and areplyTranslate commands for sending translated replies.
+* Ensured config, snippet, blacklist, and transcript files use UTF-8 encoding to preserve non-English text without mojibake.
 * Added OpenAI dependency for translation and AI summarization features.
 * Tokens and API keys now load from a modmail.env file using python-dotenv.
 * Corrected OpenAI API calls using AsyncOpenAI client.

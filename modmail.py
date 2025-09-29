@@ -113,7 +113,7 @@ def normalise_config_keys(data: dict) -> dict:
     return data
 
 
-with open('config.json', 'r') as config_file:
+with open('config.json', 'r', encoding='utf-8') as config_file:
     config = Config(**normalise_config_keys(json.load(config_file)))
 
 # Override sensitive values from environment
@@ -131,20 +131,20 @@ TRANSLATION_NOTICE = (
 )
 
 try:
-    with open('snippets.json', 'r') as snippets_file:
+    with open('snippets.json', 'r', encoding='utf-8') as snippets_file:
         snippets = json.load(snippets_file)
 except FileNotFoundError:
     snippets = {}
-    with open('snippets.json', 'w') as snippets_file:
-        json.dump(snippets, snippets_file)
+    with open('snippets.json', 'w', encoding='utf-8') as snippets_file:
+        json.dump(snippets, snippets_file, ensure_ascii=False)
 
 try:
-    with open('blacklist.json', 'r') as blacklist_file:
+    with open('blacklist.json', 'r', encoding='utf-8') as blacklist_file:
         blacklist_list = json.load(blacklist_file)
 except FileNotFoundError:
     blacklist = []
-    with open('blacklist.json', 'w') as blacklist_file:
-        json.dump(blacklist, blacklist_file)
+    with open('blacklist.json', 'w', encoding='utf-8') as blacklist_file:
+        json.dump(blacklist, blacklist_file, ensure_ascii=False)
 
 with sqlite3.connect('logs.db') as connection:
     cursor = connection.cursor()
@@ -206,7 +206,7 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
         if config.anonymous_tickets:
             ticket_name = 'ticket 0001'
             try:
-                with open('counter.txt', 'r+') as file:
+                with open('counter.txt', 'r+', encoding='utf-8') as file:
                     counter = int(file.read())
                     counter += 1
                     if counter >= 10000:
@@ -215,7 +215,7 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                     file.seek(0)
                     file.write(str(counter))
             except (ValueError, FileNotFoundError):
-                with open('counter.txt', 'w+') as file:
+                with open('counter.txt', 'w+', encoding='utf-8') as file:
                     file.write('1')
         else:
             ticket_name = f'{user.name}'
@@ -1390,7 +1390,7 @@ async def close(ctx, *, reason: str = ''):
         channel_messages = []
     thread_messages = []
 
-    with open(f'{user_id}.txt', 'w') as txt_log:
+    with open(f'{user_id}.txt', 'w', encoding='utf-8') as txt_log:
         for message in channel_messages:
             if len(message.embeds) == 1:
 
@@ -1419,7 +1419,7 @@ async def close(ctx, *, reason: str = ''):
             txt_log.write(f'\n[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name}: '
                           f'{message.content}')
 
-    with open(f'{user_id}.htm', 'w') as htm_log:
+    with open(f'{user_id}.htm', 'w', encoding='utf-8') as htm_log:
         htm_log.write(
             '''
 <!doctype html>
@@ -1533,7 +1533,7 @@ async def close(ctx, *, reason: str = ''):
     # New feature: uses GPT-4o to summarise the ticket for moderators
     summary = None
     try:
-        with open(f'{user_id}.txt') as summary_file:
+        with open(f'{user_id}.txt', 'r', encoding='utf-8') as summary_file:
             transcript = summary_file.read()
         if transcript.strip():
             response = await openai_client.chat.completions.create(
@@ -1653,8 +1653,8 @@ async def add(ctx, name: str, *, content: str):
         return
 
     snippets.update({name: content})
-    with open('snippets.json', 'w') as file:
-        json.dump(snippets, file)
+    with open('snippets.json', 'w', encoding='utf-8') as file:
+        json.dump(snippets, file, ensure_ascii=False)
     embed = embed_creator('Snippet Added', '', 'b')
     embed.add_field(name='Name', value=name)
     embed.add_field(name='Content', value=content, inline=False)
@@ -1668,8 +1668,8 @@ async def edit(ctx, name: str, *, content: str):
     name = name.lower()
     if name in snippets:
         snippets.update({name: content})
-        with open('snippets.json', 'w') as file:
-            json.dump(snippets, file)
+        with open('snippets.json', 'w', encoding='utf-8') as file:
+            json.dump(snippets, file, ensure_ascii=False)
         embed = embed_creator('Snippet Edited', '', 'b')
         embed.add_field(name='Name', value=name)
         embed.add_field(name='Content', value=content, inline=False)
@@ -1685,8 +1685,8 @@ async def remove(ctx, name: str):
     name = name.lower()
     if name in snippets:
         content = snippets.pop(name)
-        with open('snippets.json', 'w') as file:
-            json.dump(snippets, file)
+        with open('snippets.json', 'w', encoding='utf-8') as file:
+            json.dump(snippets, file, ensure_ascii=False)
         embed = embed_creator('Snippet Removed', '', 'b')
         embed.add_field(name='Name', value=name)
         embed.add_field(name='Content', value=content, inline=False)
@@ -1751,8 +1751,8 @@ async def add(ctx, user: discord.User, *, reason: str = ''):
         await confirmation.edit(embed=embed_creator('', 'Blacklisting cancelled by moderator.', 'b'), view=None)
         return
     blacklist_list.append(user.id)
-    with open('blacklist.json', 'w') as file:
-        json.dump(blacklist_list, file)
+    with open('blacklist.json', 'w', encoding='utf-8') as file:
+        json.dump(blacklist_list, file, ensure_ascii=False)
 
     embed_user = embed_creator('Access Revoked', f'Your access to {bot.user.name} has been revoked by the moderators. You will no longer be able to send messages here.', 'r', ctx.guild)
     confirmation_msg = f'**{user}** has been blacklisted. They will no longer be able to message {bot.user.name}. User notified by direct message.'
@@ -1778,8 +1778,8 @@ async def remove(ctx, user_id: int):
 
     if user_id in blacklist_list:
         blacklist_list.remove(user_id)
-        with open('blacklist.json', 'w') as file:
-            json.dump(blacklist_list, file)
+        with open('blacklist.json', 'w', encoding='utf-8') as file:
+            json.dump(blacklist_list, file, ensure_ascii=False)
         await ctx.send(embed=embed_creator('Blacklist Updated', f'User with ID `{user_id}` has been un-blacklisted. They can now message {bot.user.name}.', 'b'))
     else:
         await ctx.send(embed=embed_creator('', f'User with ID `{user_id}` is not blacklisted.', 'e'))
@@ -1831,7 +1831,7 @@ async def ping(ctx):
 async def refresh(ctx):
     """Re-reads the external config file"""
 
-    with open('config.json', 'r') as file:
+    with open('config.json', 'r', encoding='utf-8') as file:
         config.update(normalise_config_keys(json.load(file)))
     await ctx.message.add_reaction('\u2705')
 
