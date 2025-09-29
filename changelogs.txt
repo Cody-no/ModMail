@@ -1,4 +1,6 @@
 
+* Broadcast command now spins up a dedicated forum channel for each announcement and tags broadcast-created tickets for cleanup.
+* Added a `!closebroadcast` command to retire broadcast-only tickets and remove the temporary coordination forum.
 * Ensured newly created ticket threads are fetched before use so the first DM no longer fails with Unknown Channel errors.
 * Reduced the delay on opening DMs by scheduling forum title updates asynchronously and preventing them from blocking ticket creation.
 * Fixed the forum title counter so it no longer appends duplicate numbers when Discord slugifies the channel name.

@@ -165,6 +165,11 @@ with sqlite3.connect('tickets.db') as connection:
         'PRIMARY KEY (aggregator_id, user_id))'
     )
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_broadcast_thread ON broadcast_links(thread_id)')
+    # Feature: track which ticket threads were opened specifically for a broadcast so they can be closed automatically.
+    cursor.execute(
+        'CREATE TABLE IF NOT EXISTS broadcast_new_threads ('
+        'aggregator_id INTEGER, thread_id INTEGER, PRIMARY KEY (aggregator_id, thread_id))'
+    )
     connection.commit()
 
 
@@ -416,6 +421,7 @@ def unlink_thread_from_broadcasts(thread_id: int) -> None:
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         curs.execute('DELETE FROM broadcast_links WHERE thread_id=?', (thread_id,))
+        curs.execute('DELETE FROM broadcast_new_threads WHERE thread_id=?', (thread_id,))
         conn.commit()
 
 
@@ -425,6 +431,38 @@ def unlink_aggregator(aggregator_id: int) -> None:
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         curs.execute('DELETE FROM broadcast_links WHERE aggregator_id=?', (aggregator_id,))
+        curs.execute('DELETE FROM broadcast_new_threads WHERE aggregator_id=?', (aggregator_id,))
+        conn.commit()
+
+
+# Feature: manage records for broadcast tickets that were opened automatically for a mass message.
+def mark_broadcast_created_thread(aggregator_id: int, thread_id: int) -> None:
+    """Record that a ticket thread originated from a broadcast so it can be closed later."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'INSERT OR IGNORE INTO broadcast_new_threads (aggregator_id, thread_id) VALUES (?, ?)',
+            (aggregator_id, thread_id)
+        )
+        conn.commit()
+
+
+def get_broadcast_created_threads(aggregator_id: int) -> set[int]:
+    """Return a set of ticket IDs that were spawned by the broadcast aggregator."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('SELECT thread_id FROM broadcast_new_threads WHERE aggregator_id=?', (aggregator_id,))
+        return {row[0] for row in curs.fetchall()}
+
+
+def clear_broadcast_created_threads(aggregator_id: int) -> None:
+    """Remove records for broadcast-created tickets after cleanup has run."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM broadcast_new_threads WHERE aggregator_id=?', (aggregator_id,))
         conn.commit()
 
 
@@ -1279,6 +1317,7 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         return
 
     recipients: list[tuple[int, int]] = []
+    recipient_details: list[tuple[int, int, bool]] = []
     setup_failures: list[str] = []
     prepared_users: list[discord.User] = []
 
@@ -1296,6 +1335,7 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
             channel_row = res.fetchone()
 
         thread: discord.Thread | None = None
+        created_for_broadcast = False
         if channel_row:
             thread_id = channel_row[0]
             thread = await resolve_thread(thread_id)
@@ -1308,10 +1348,12 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
 
         if thread is None:
             thread = await ticket_creator(user, ctx.guild)
+            created_for_broadcast = True
         else:
             await ensure_thread_open(thread)
 
         recipients.append((user.id, thread.id))
+        recipient_details.append((user.id, thread.id, created_for_broadcast))
         prepared_users.append(user)
 
     if not recipients:
@@ -1350,16 +1392,45 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         name = 'Recipients' if len(recipients_chunks) == 1 else f'Recipients (Part {index})'
         summary_embed.add_field(name=name, value=chunk, inline=False)
 
-    thread_name = f'Send to All {timestamp}'
-    broadcast_thread = await forum_channel.create_thread(
-        name=thread_name,
-        embed=summary_embed,
-        auto_archive_duration=duration
-    )
+    # Feature: each broadcast now lives in its own temporary forum channel for clearer coordination.
+    forum_name = f'Send to All {timestamp}'
+    reason = f'Broadcast initiated by {ctx.author} ({ctx.author.id})'
+    category = forum_channel.category if isinstance(forum_channel, discord.ForumChannel) else None
+    try:
+        broadcast_forum = await ctx.guild.create_forum_channel(
+            name=forum_name,
+            category=category,
+            default_auto_archive_duration=duration,
+            reason=reason
+        )
+    except discord.HTTPException:
+        await ctx.send(
+            embed=embed_creator('', 'Unable to create a forum channel for the broadcast. Check my permissions.', 'e')
+        )
+        return
+
+    try:
+        created_thread = await broadcast_forum.create_thread(
+            name='Coordination Thread',
+            embed=summary_embed,
+            auto_archive_duration=duration
+        )
+    except discord.HTTPException:
+        await ctx.send(embed=embed_creator('', 'Failed to create the broadcast coordination thread.', 'e'))
+        try:
+            await broadcast_forum.delete(reason='Cleaning up incomplete broadcast forum.')
+        except discord.HTTPException:
+            pass
+        return
+
+    broadcast_thread = unwrap_created_thread(created_thread)
+    broadcast_thread = await ensure_thread_ready(broadcast_thread)
     await broadcast_thread.edit(pinned=True)
 
-    for user_id, thread_id in recipients:
+    for user_id, thread_id, created_for_broadcast in recipient_details:
         link_broadcast_thread(broadcast_thread.id, user_id, thread_id)
+        if created_for_broadcast:
+            mark_broadcast_created_thread(broadcast_thread.id, thread_id)
 
     await dispatch_broadcast_message(
         broadcast_thread,
@@ -1371,17 +1442,152 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         recipients
     )
 
-    confirmation = embed_creator('Broadcast Created', f'Broadcast thread {broadcast_thread.mention} is live.', 'g', ctx.guild)
+    confirmation = embed_creator(
+        'Broadcast Created',
+        f'Broadcast thread {broadcast_thread.mention} is live. Use `!closebroadcast` to wrap it up when you are done.',
+        'g',
+        ctx.guild
+    )
     if setup_failures:
         failure_text = '\n'.join(setup_failures)
         confirmation.add_field(name='Not Included', value=failure_text[:1024], inline=False)
     await ctx.send(embed=confirmation)
 
 
+# Feature: allow moderators to retire broadcasts and automatically close temporary tickets.
+@bot.command(name='closebroadcast')
+@commands.guild_only()
+@commands.check(is_mod)
+async def closebroadcast(ctx):
+    """Close a broadcast coordination thread and clean up linked tickets."""
+
+    if not isinstance(ctx.channel, discord.Thread):
+        await ctx.send(embed=embed_creator('', 'Run this command from inside the broadcast coordination thread.', 'e'))
+        return
+
+    recipients = get_broadcast_recipients_for_aggregator(ctx.channel.id)
+    if not recipients:
+        await ctx.send(embed=embed_creator('', 'This thread is not associated with an active broadcast.', 'e'))
+        return
+
+    created_threads = get_broadcast_created_threads(ctx.channel.id)
+    closed_mentions: list[str] = []
+    retained_mentions: list[str] = []
+
+    for user_id, thread_id in recipients:
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            with sqlite3.connect('tickets.db') as conn:
+                curs = conn.cursor()
+                curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread_id,))
+                conn.commit()
+            unlink_thread_from_broadcasts(thread_id)
+            continue
+
+        if thread_id in created_threads:
+            try:
+                await thread.send(
+                    embed=embed_creator(
+                        'Broadcast Closed',
+                        'This broadcast-only ticket has been closed automatically.',
+                        'r',
+                        ctx.guild,
+                        ctx.author,
+                        anon=False
+                    )
+                )
+            except discord.HTTPException:
+                pass
+            with sqlite3.connect('tickets.db') as conn:
+                curs = conn.cursor()
+                curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread.id,))
+                conn.commit()
+            unlink_thread_from_broadcasts(thread.id)
+            try:
+                await thread.edit(archived=True, locked=True)
+            except discord.HTTPException:
+                pass
+            closed_mentions.append(thread.mention)
+        else:
+            unlink_thread_from_broadcasts(thread.id)
+            try:
+                await thread.send(
+                    embed=embed_creator(
+                        'Broadcast Closed',
+                        'The broadcast has ended. This ticket continues as a normal conversation.',
+                        'b',
+                        ctx.guild,
+                        ctx.author,
+                        anon=False
+                    )
+                )
+            except discord.HTTPException:
+                pass
+            retained_mentions.append(thread.mention)
+
+    unlink_aggregator(ctx.channel.id)
+    clear_broadcast_created_threads(ctx.channel.id)
+
+    summary = embed_creator(
+        'Broadcast Closed',
+        'Linked tickets have been updated and the broadcast has been shut down.',
+        'g',
+        ctx.guild,
+        ctx.author,
+        anon=False
+    )
+    if closed_mentions:
+        summary.add_field(name='Closed Tickets', value='\n'.join(closed_mentions)[:1024], inline=False)
+    if retained_mentions:
+        summary.add_field(name='Active Tickets', value='\n'.join(retained_mentions)[:1024], inline=False)
+
+    await ctx.send(embed=summary)
+
+    parent_channel = ctx.channel.parent
+    try:
+        await ctx.channel.delete()
+    except discord.HTTPException:
+        pass
+    if isinstance(parent_channel, discord.ForumChannel) and parent_channel.id != config.forum_channel_id:
+        try:
+            await parent_channel.delete(reason='Removing broadcast forum after closure.')
+        except discord.HTTPException:
+            pass
+
+    if closed_mentions:
+        schedule_forum_name_update()
+
+
 @bot.command()
 @commands.check(is_helper)
 async def close(ctx, *, reason: str = ''):
     """Anonymously closes and logs a ticket"""
+
+    recipients = get_broadcast_recipients_for_aggregator(ctx.channel.id)
+    if recipients and not is_modmail_channel(ctx):
+        unlink_aggregator(ctx.channel.id)
+        clear_broadcast_created_threads(ctx.channel.id)
+        await ctx.send(
+            embed=embed_creator(
+                'Broadcast Closed',
+                'This broadcast coordination thread has been closed. Linked tickets remain open for follow ups.',
+                'r',
+                ctx.guild,
+                ctx.author,
+                anon=False
+            )
+        )
+        parent_channel = ctx.channel.parent
+        try:
+            await ctx.channel.delete()
+        except discord.HTTPException:
+            pass
+        if isinstance(parent_channel, discord.ForumChannel) and parent_channel.id != config.forum_channel_id:
+            try:
+                await parent_channel.delete(reason='Removing broadcast forum after closure.')
+            except discord.HTTPException:
+                pass
+        return
 
     if not is_modmail_channel(ctx):
         await ctx.send(embed=embed_creator('', 'This channel is not a valid ticket.', 'e'))
@@ -1397,21 +1603,6 @@ async def close(ctx, *, reason: str = ''):
         user_id = res.fetchone()
 
     if not user_id:
-        recipients = get_broadcast_recipients_for_aggregator(ctx.channel.id)
-        if recipients:
-            unlink_aggregator(ctx.channel.id)
-            await ctx.send(
-                embed=embed_creator(
-                    'Broadcast Closed',
-                    'This broadcast coordination thread has been closed. Linked tickets remain open for follow ups.',
-                    'r',
-                    ctx.guild,
-                    ctx.author,
-                    anon=False
-                )
-            )
-            await ctx.channel.delete()
-            return
         await ctx.send(embed=embed_creator('', 'This thread is not associated with a ticket.', 'e'))
         return
 
