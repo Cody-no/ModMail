@@ -20,7 +20,17 @@ From v.1.1.0 onwards there is also an option to send messages only with the comm
 
 - `!send` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
 
-- `!broadcast` creates a pinned "Send to All" coordination thread that delivers a message to several tickets at once and keeps every linked conversation in sync.
+- `!sendmany`, `!replymany`, and `!closemany` let you tag a group of tickets with a temporary label, deliver the same update to each one, and close them together when the follow-up is finished.
+
+### Group tag bulk commands
+
+Use the group tag commands when you need to contact several members about the same topic. Every command works with the temporary group tag created by `!sendmany` so you can keep their ticket updates together.
+
+- `!sendmany <ids> <group name> <message>` — Provide a comma-separated list of user IDs and a group name. The command opens tickets as needed, sends the anonymous message (or attachments) to every member, and tags their threads so you can follow up later.
+- `!replymany <group name> <message>` — Sends a normal moderator reply to each ticket currently tagged with the supplied group name. You can include attachments exactly like a regular reply.
+- `!closemany <group name> [reason]` — Closes all tickets tagged with the group name and removes the temporary tag afterwards. The optional reason is logged just like the standard `!close` command.
+
+When you finish working with a group, `!closemany` automatically deletes the temporary forum tag once every ticket has been closed.
 
 - **The following is features I (Codyno) have added onto the existing bot**:
 
