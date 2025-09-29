@@ -115,7 +115,7 @@ def normalise_config_keys(data: dict) -> dict:
     return data
 
 with open('config.json', 'r', encoding='utf-8') as config_file:
-normalise_config_keys(json.load(config_file)))
+    config = Config(**normalise_config_keys(json.load(config_file)))
 
 
 # Override sensitive values from environment
