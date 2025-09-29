@@ -5,6 +5,7 @@
 * Forced `config.json` to load with UTF-8 so automated ticket messages preserve emoji and other non-ASCII characters.
 * Delayed temporary tag cleanup until after ticket deletion and report failures so moderators know when manual intervention is required.
 * Documented the `!sendmany`, `!replymany`, and `!closemany` group workflow in the README so moderators know how to use the new commands.
+
 * Removed the broadcast forum workflow and its commands in favor of simpler group-tag automation.
 * Added `!sendmany`, `!replymany`, and `!closemany` commands for sending, replying, and closing groups of tickets via temporary tags.
 * Persisted group tag membership in the database and clean up tags automatically when tickets close.
@@ -44,4 +45,6 @@
 * Documented `modmail.env` usage in README setup instructions.
 
 * Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
+
+* Fixed config loading to always use UTF-8 so Japanese text and emoji in modmail responses display correctly.
 

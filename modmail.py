@@ -1,5 +1,4 @@
 import time
-
 import discord
 from discord.ext import commands
 import bleach
@@ -115,9 +114,8 @@ def normalise_config_keys(data: dict) -> dict:
         data['category_id'] = data['forum_channel_id']
     return data
 
-
 with open('config.json', 'r', encoding='utf-8') as config_file:
-    config = Config(**normalise_config_keys(json.load(config_file)))
+normalise_config_keys(json.load(config_file)))
 
 
 # Override sensitive values from environment
@@ -410,6 +408,7 @@ def add_thread_to_group(group_name: str, thread_id: int) -> None:
         conn.commit()
 
 
+
 def get_group_threads(group_name: str) -> list[int]:
     """Return all ticket thread IDs currently tagged with the provided group name."""
 
@@ -653,8 +652,8 @@ async def error_handler(error, message=None):
             pass
         return
 
-    error_channel = get_error_channel()
 
+    error_channel = get_error_channel()
     if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
         'Maximum number of channels in category reached',
         'Maximum number of active threads reached',
@@ -723,6 +722,7 @@ async def error_handler(error, message=None):
             print(tb)
 
 
+
 async def close_ticket_thread(
     thread: discord.Thread,
     moderator: discord.abc.User,
@@ -733,6 +733,7 @@ async def close_ticket_thread(
     user_reason: str | None = None,
     original_reason: str | None = None,
     translation_notice: str | None = None
+
 ) -> tuple[bool, str | None]:
     """Close a modmail ticket thread, returning success and an optional error message."""
 
@@ -742,7 +743,6 @@ async def close_ticket_thread(
     for text in (reason, user_reason, original_reason):
         if text and len(text) > 1024:
             return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
-
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread.id,))
@@ -1623,7 +1623,6 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
 @commands.check(is_helper)
 async def replymany(ctx, group_name: str, *, message: str = ''):
     """Reply non-anonymously to every ticket associated with the supplied tag."""
-
     await execute_group_reply(ctx, group_name, message, anon=False, summary_title='Reply Many')
 
 
@@ -1725,7 +1724,6 @@ async def execute_group_close(
         original_reason = reason
     elif language:
         translation_notice = None
-
     closed: list[str] = []
     failures: list[str] = []
 
@@ -1844,6 +1842,7 @@ async def aclosetmany(ctx, group_name: str, language: str, *, reason: str = ''):
         language=language,
         extra_fields=[('Language', language)]
     )
+
 
 
 @bot.command()
