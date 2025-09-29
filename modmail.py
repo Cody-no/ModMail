@@ -116,7 +116,7 @@ def normalise_config_keys(data: dict) -> dict:
     return data
 
 
-with open('config.json', 'r') as config_file:
+with open('config.json', 'r', encoding='utf-8') as config_file:
     config = Config(**normalise_config_keys(json.load(config_file)))
 
 
@@ -159,12 +159,12 @@ with sqlite3.connect('logs.db') as connection:
 with sqlite3.connect('tickets.db') as connection:
     cursor = connection.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS tickets (user_id, channel_id)')
-    # Feature: maintain broadcast thread relationships linking aggregator threads to recipient tickets.
+    # Feature: track which tickets are part of a multi-user group tag so bulk commands can target them later.
     cursor.execute(
-        'CREATE TABLE IF NOT EXISTS broadcast_links (aggregator_id INTEGER, user_id INTEGER, thread_id INTEGER, '
-        'PRIMARY KEY (aggregator_id, user_id))'
+        'CREATE TABLE IF NOT EXISTS group_tags ('
+        'group_name TEXT COLLATE NOCASE, thread_id INTEGER, PRIMARY KEY (group_name, thread_id))'
     )
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_broadcast_thread ON broadcast_links(thread_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_group_thread ON group_tags(thread_id)')
     connection.commit()
 
 
@@ -311,6 +311,19 @@ def require_text_channel(channel_id: int, purpose: str) -> discord.TextChannel:
     raise RuntimeError(f'The {purpose} channel (ID {channel_id}) must be a regular text channel, not {channel.__class__.__name__}.')
 
 
+def get_error_channel() -> discord.TextChannel | None:
+    """Return the configured error channel when available without raising."""
+
+    channel = bot.get_channel(config.error_channel_id)
+    if channel is None:
+        guild = bot.get_guild(config.guild_id)
+        if guild is not None:
+            channel = guild.get_channel(config.error_channel_id)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    return None
+
+
 # Keep the ticket category name updated with the current channel count
 async def update_forum_name():
     """Rename the modmail forum to show the number of active ticket threads."""
@@ -374,68 +387,174 @@ async def ensure_thread_ready(thread: discord.Thread) -> discord.Thread:
     return thread
 
 
-def link_broadcast_thread(aggregator_id: int, user_id: int, thread_id: int) -> None:
-    """Record that a broadcast aggregator thread is associated with a user ticket."""
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute(
-            'INSERT OR REPLACE INTO broadcast_links (aggregator_id, user_id, thread_id) VALUES (?, ?, ?)',
-            (aggregator_id, user_id, thread_id)
-        )
-        conn.commit()
-
-
-def get_broadcast_recipients_for_aggregator(aggregator_id: int) -> list[tuple[int, int]]:
-    """Return (user_id, thread_id) tuples for a given aggregator thread."""
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute(
-            'SELECT user_id, thread_id FROM broadcast_links WHERE aggregator_id=?',
-            (aggregator_id,)
-        )
-        return curs.fetchall()
-
-
-def get_broadcast_aggregators_for_thread(thread_id: int) -> list[int]:
-    """Return aggregator thread IDs linked to a ticket thread."""
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute(
-            'SELECT aggregator_id FROM broadcast_links WHERE thread_id=?',
-            (thread_id,)
-        )
-        return [row[0] for row in curs.fetchall()]
-
-
-def unlink_thread_from_broadcasts(thread_id: int) -> None:
-    """Remove any broadcast links that reference a given ticket thread."""
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute('DELETE FROM broadcast_links WHERE thread_id=?', (thread_id,))
-        conn.commit()
-
-
-def unlink_aggregator(aggregator_id: int) -> None:
-    """Remove all broadcast links for an aggregator thread."""
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute('DELETE FROM broadcast_links WHERE aggregator_id=?', (aggregator_id,))
-        conn.commit()
-
-
 async def ensure_thread_open(thread: discord.Thread) -> discord.Thread:
-    """Reopen archived threads so broadcasts can resume without errors."""
+    """Reopen archived threads so they can receive new messages."""
 
     if thread.archived:
         try:
             await thread.edit(archived=False, locked=False)
         except discord.HTTPException:
             pass
+    return thread
+
+
+def add_thread_to_group(group_name: str, thread_id: int) -> None:
+    """Record that a ticket thread belongs to a bulk-message group."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'INSERT OR REPLACE INTO group_tags (group_name, thread_id) VALUES (?, ?)',
+            (group_name, thread_id)
+        )
+        conn.commit()
+
+
+def get_group_threads(group_name: str) -> list[int]:
+    """Return all ticket thread IDs currently tagged with the provided group name."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('SELECT thread_id FROM group_tags WHERE group_name=?', (group_name,))
+        return [row[0] for row in curs.fetchall()]
+
+
+def remove_thread_from_groups(thread_id: int) -> None:
+    """Remove a ticket thread from any bulk-message groups it previously joined."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM group_tags WHERE thread_id=?', (thread_id,))
+        conn.commit()
+
+
+def remove_group(group_name: str) -> None:
+    """Delete all tracking metadata for a bulk-message group."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM group_tags WHERE group_name=?', (group_name,))
+        conn.commit()
+
+
+async def require_forum_channel() -> discord.ForumChannel:
+    """Return the configured forum channel or raise if it is missing."""
+
+    channel = bot.get_channel(config.forum_channel_id)
+    if channel is None:
+        guild = bot.get_guild(config.guild_id)
+        if guild is not None:
+            channel = guild.get_channel(config.forum_channel_id)
+    if isinstance(channel, discord.ForumChannel):
+        return channel
+    raise RuntimeError('Configured modmail forum channel is missing or not a forum channel.')
+
+
+async def ensure_group_tag(tag_name: str) -> tuple[discord.ForumChannel, discord.ForumTag]:
+    """Fetch or create the forum tag used to coordinate a bulk message group."""
+
+    cleaned_name = tag_name.strip()
+    if not cleaned_name:
+        raise ValueError('Group name cannot be empty.')
+    if len(cleaned_name) > 20:
+        raise ValueError('Group names must be 20 characters or fewer.')
+
+    forum_channel = await require_forum_channel()
+    for tag in forum_channel.available_tags:
+        if tag.name.lower() == cleaned_name.lower():
+            return forum_channel, tag
+
+    if len(forum_channel.available_tags) >= 20:
+        raise RuntimeError('No tag slots available in the modmail forum.')
+    created_tag = await forum_channel.create_tag(name=cleaned_name)
+    return forum_channel, created_tag
+
+
+async def apply_group_tag(thread: discord.Thread, tag: discord.ForumTag) -> None:
+    """Attach the provided group tag to the supplied ticket thread."""
+
+    current_tags = list(thread.applied_tags)
+    if any(existing.id == tag.id for existing in current_tags):
+        return
+    current_tags.append(tag)
+    await thread.edit(applied_tags=current_tags)
+
+
+async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.ForumTag) -> bool:
+    """Attempt to remove the provided forum tag and report success."""
+
+    try:
+        await forum_channel.delete_tag(tag)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def deliver_modmail_payload(
+    user: discord.User,
+    thread: discord.Thread,
+    guild: discord.Guild,
+    moderator: discord.abc.User,
+    text: str,
+    anon: bool,
+    attachments: list[tuple[str, bytes]],
+    *,
+    original_text: str | None = None,
+    translation_notice: str | None = None
+) -> tuple[bool, str | None]:
+    """Send a DM to the user and mirror it inside the ticket thread."""
+
+    channel_embed = embed_creator('Message Sent', text, 'r', user, moderator, anon)
+    user_embed = embed_creator('Message Received', text, 'r', guild)
+    if not anon:
+        user_embed.set_author(name=moderator.display_name, icon_url=moderator.display_avatar.url)
+    if original_text:
+        channel_embed.add_field(name='Original', value=original_text[:1024], inline=False)
+        user_embed.add_field(name='Original', value=original_text[:1024], inline=False)
+    if translation_notice:
+        user_embed.set_footer(text=translation_notice, icon_url=user_embed.footer.icon_url if user_embed.footer else None)
+
+    dm_files = payloads_to_files(attachments)
+    try:
+        user_message = await user.send(embed=user_embed, files=dm_files)
+    except discord.Forbidden:
+        return False, 'DMs blocked or disabled.'
+
+    for index, attachment in enumerate(user_message.attachments, start=1):
+        channel_embed.add_field(name=f'Attachment {index}', value=attachment.url, inline=False)
+
+    thread_files = payloads_to_files(attachments)
+    try:
+        await thread.send(embed=channel_embed, files=thread_files)
+    except discord.HTTPException:
+        return False, 'Failed to post inside the ticket thread.'
+
+    return True, None
+
+
+async def get_or_create_ticket_for_user(user: discord.User, guild: discord.Guild) -> discord.Thread:
+    """Return an open ticket thread for the user, creating one when necessary."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (user.id,))
+        row = res.fetchone()
+
+    thread: discord.Thread | None = None
+    if row is not None:
+        thread_id = row[0]
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            with sqlite3.connect('tickets.db') as conn:
+                curs = conn.cursor()
+                curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread_id,))
+                conn.commit()
+        else:
+            thread = await ensure_thread_open(thread)
+
+    if thread is None:
+        thread = await ticket_creator(user, guild)
+
     return thread
 
 
@@ -469,201 +588,35 @@ def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str
     return payloads
 
 
-def build_broadcast_embeds(
-    user: discord.User,
-    guild: discord.Guild,
-    author: discord.abc.User,
-    text: str,
-    anon: bool,
-    *,
-    translated_text: str | None = None,
-    original_text: str | None = None,
-    translation_notice: str | None = None
-) -> tuple[discord.Embed, discord.Embed]:
-    """Create the embeds sent to ticket threads and users during a broadcast."""
+async def gather_attachment_payloads(attachments: list[discord.Attachment], size_limit: int | None = None) -> list[tuple[str, bytes]]:
+    """Read attachment contents so they can be re-used across multiple destinations."""
 
-    description = translated_text if translated_text is not None else text
-    channel_embed = embed_creator('Message Sent', description, 'r', user, author, anon)
-    user_embed = embed_creator(
-        'Message Received',
-        description,
-        'r',
-        guild,
-        author if not anon else None,
-        False if not anon else True
-    )
-    if original_text:
-        channel_embed.add_field(name='Original', value=original_text[:1024], inline=False)
-        user_embed.add_field(name='Original', value=original_text[:1024], inline=False)
-    if translation_notice:
-        user_embed.set_footer(text=translation_notice, icon_url=user_embed.footer.icon_url)
-    return channel_embed, user_embed
+    payloads: list[tuple[str, bytes]] = []
+    for attachment in attachments:
+        if size_limit is not None and attachment.size > size_limit:
+            raise ValueError(attachment.filename)
+        payloads.append((attachment.filename, await attachment.read()))
+    return payloads
 
 
-async def mirror_mod_reply_to_broadcasts(
-    thread: discord.Thread,
-    user: discord.User,
-    text: str,
-    author: discord.abc.User,
-    anon: bool,
-    attachment_payloads: list[tuple[str, bytes]],
-    *,
-    translated: bool = False,
-    original_text: str | None = None,
-    translation_notice: str | None = None,
-    exclude_aggregator: int | None = None
-) -> None:
-    """Echo moderator replies into any linked broadcast threads for situational awareness."""
+def payloads_to_files(payloads: list[tuple[str, bytes]]) -> list[discord.File]:
+    """Convert stored attachment bytes back into discord.File objects."""
 
-    aggregator_ids = set(get_broadcast_aggregators_for_thread(thread.id))
-    if exclude_aggregator is not None:
-        aggregator_ids.discard(exclude_aggregator)
-    if not aggregator_ids:
-        return
-    description = text or '\u200b'
-    for aggregator_id in list(aggregator_ids):
-        aggregator_thread = await resolve_thread(aggregator_id)
-        if aggregator_thread is None:
-            unlink_aggregator(aggregator_id)
-            continue
-        embed = embed_creator('Moderator Reply', description, 'r', user, author, anon=False)
-        embed.add_field(name='Ticket', value=thread.mention, inline=False)
-        embed.set_footer(text=f'User ID: {user.id}')
-        if translated and original_text:
-            embed.add_field(name='Original', value=original_text[:1024], inline=False)
-        if translation_notice:
-            embed.add_field(name='Translation Notice', value=translation_notice[:1024], inline=False)
-        if anon:
-            embed.add_field(name='Sent As', value='Anonymous', inline=False)
-        files = payloads_to_files(attachment_payloads)
-        await aggregator_thread.send(embed=embed, files=files)
+    files: list[discord.File] = []
+    for filename, data in payloads:
+        files.append(discord.File(io.BytesIO(data), filename))
+    return files
 
 
-async def mirror_user_message_to_broadcasts(
-    thread: discord.Thread,
-    user: discord.User,
-    content: str,
-    attachments: list[discord.Attachment]
-) -> None:
-    """Mirror user replies into broadcast aggregator threads so moderators see updates."""
+def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str, bytes]]:
+    """Translate the legacy (BytesIO, filename) tuples into reusable payload data."""
 
-    aggregator_ids = set(get_broadcast_aggregators_for_thread(thread.id))
-    if not aggregator_ids:
-        return
-    payloads = await gather_attachment_payloads(attachments)
-    description = content or '\u200b'
-    for aggregator_id in list(aggregator_ids):
-        aggregator_thread = await resolve_thread(aggregator_id)
-        if aggregator_thread is None:
-            unlink_aggregator(aggregator_id)
-            continue
-        embed = embed_creator('User Reply', description, 'g', user)
-        embed.add_field(name='Ticket', value=thread.mention, inline=False)
-        embed.set_footer(text=f'User ID: {user.id}')
-        files = payloads_to_files(payloads)
-        await aggregator_thread.send(embed=embed, files=files)
+    payloads: list[tuple[str, bytes]] = []
+    for buffer, filename in buffers:
+        buffer.seek(0)
+        payloads.append((filename, buffer.getvalue()))
+    return payloads
 
-
-async def dispatch_broadcast_message(
-    channel: discord.Thread,
-    author: discord.abc.User,
-    guild: discord.Guild,
-    text: str,
-    anon: bool,
-    attachments: list[tuple[str, bytes]],
-    recipients: list[tuple[int, int]],
-    *,
-    original_message: discord.Message | None = None,
-    translated_text: str | None = None,
-    original_text: str | None = None,
-    translation_notice: str | None = None
-) -> None:
-    """Send a broadcast payload to every linked ticket, reporting delivery status in-channel."""
-
-    if not text and not attachments:
-        error_embed = embed_creator('', 'Cannot send an empty broadcast.', 'e')
-        await channel.send(embed=error_embed)
-        if original_message is not None:
-            await original_message.delete()
-        return
-
-    delivered: list[tuple[discord.User, discord.Thread]] = []
-    failed: list[str] = []
-    description = translated_text if translated_text is not None else text
-
-    for user_id, thread_id in recipients:
-        try:
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-        except discord.NotFound:
-            failed.append(f'User `{user_id}` could not be fetched.')
-            continue
-
-        if guild not in getattr(user, 'mutual_guilds', []):
-            failed.append(f'{user.mention} not in guild.')
-            continue
-
-        thread = await resolve_thread(thread_id)
-        if thread is None:
-            failed.append(f'{user.mention} missing ticket.')
-            unlink_thread_from_broadcasts(thread_id)
-            continue
-
-        await ensure_thread_open(thread)
-
-        channel_embed, user_embed = build_broadcast_embeds(
-            user,
-            guild,
-            author,
-            text,
-            anon,
-            translated_text=translated_text,
-            original_text=original_text,
-            translation_notice=translation_notice
-        )
-        user_files = payloads_to_files(attachments)
-        try:
-            user_message = await user.send(embed=user_embed, files=user_files)
-        except discord.Forbidden:
-            failed.append(f'{user.mention} blocked DMs.')
-            continue
-
-        for index, attachment in enumerate(user_message.attachments):
-            channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
-
-        try:
-            channel_files = payloads_to_files(attachments)
-            await thread.send(embed=channel_embed, files=channel_files)
-        except discord.HTTPException:
-            failed.append(f'Failed to post in {thread.mention}.')
-            continue
-
-        await mirror_mod_reply_to_broadcasts(
-            thread,
-            user,
-            description,
-            author,
-            anon,
-            attachments,
-            translated=translated_text is not None,
-            original_text=original_text,
-            translation_notice=translation_notice,
-            exclude_aggregator=channel.id
-        )
-        delivered.append((user, thread))
-
-    if original_message is not None:
-        await original_message.delete()
-
-    summary_embed = embed_creator('Broadcast Message', description or '\u200b', 'r', guild, author, anon=False, time=True)
-    if original_text and translated_text is not None:
-        summary_embed.add_field(name='Original', value=original_text[:1024], inline=False)
-    if delivered:
-        delivered_lines = [f'{user.mention} — {thread.mention}' for user, thread in delivered]
-        summary_embed.add_field(name='Delivered', value='\n'.join(delivered_lines)[:1024], inline=False)
-    if failed:
-        summary_embed.add_field(name='Failed', value='\n'.join(failed)[:1024], inline=False)
-    files = payloads_to_files(attachments)
-    await channel.send(embed=summary_embed, files=files)
 
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
@@ -700,19 +653,22 @@ async def error_handler(error, message=None):
             pass
         return
 
+    error_channel = get_error_channel()
+
     if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
         'Maximum number of channels in category reached',
         'Maximum number of active threads reached',
         'Maximum number of active private threads reached'
     )):
-        await bot.get_channel(config.error_channel_id).send(
-            embed=embed_creator(
-                'Inbox Full',
-                f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of active threads in the forum has been reached.',
-                'e',
-                author=message.author
+        if error_channel is not None:
+            await error_channel.send(
+                embed=embed_creator(
+                    'Inbox Full',
+                    f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of active threads in the forum has been reached.',
+                    'e',
+                    author=message.author
+                )
             )
-        )
         try:
             await message.channel.send(
                 embed=embed_creator(
@@ -742,40 +698,286 @@ async def error_handler(error, message=None):
         embed = None
 
     tb = "".join(traceback.format_exception(error))
+    owner = bot.get_user(config.bot_owner_id)
+    if owner is None:
+        try:
+            owner = await bot.fetch_user(config.bot_owner_id)
+        except discord.HTTPException:
+            owner = None
+
     if len(tb) > 2000:
-        await bot.get_user(config.bot_owner_id).send(
-            file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
-        await bot.get_channel(config.error_channel_id).send(
-            file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        if owner is not None:
+            await owner.send(
+                file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        if error_channel is not None:
+            await error_channel.send(
+                file=discord.File(io.BytesIO(tb.encode('utf-8')), filename='error.txt'), embed=embed)
+        else:
+            print(tb)
     else:
-        await bot.get_user(config.bot_owner_id).send(f'```py\n{tb}```', embed=embed)
-        await bot.get_channel(config.error_channel_id).send(f'```py\n{tb}```', embed=embed)
+        if owner is not None:
+            await owner.send(f'```py\n{tb}```', embed=embed)
+        if error_channel is not None:
+            await error_channel.send(f'```py\n{tb}```', embed=embed)
+        else:
+            print(tb)
+
+
+async def close_ticket_thread(
+    thread: discord.Thread,
+    moderator: discord.abc.User,
+    reason: str = '',
+    *,
+    skip_confirmation: bool = False,
+    log_anon: bool = False,
+    user_reason: str | None = None,
+    original_reason: str | None = None,
+    translation_notice: str | None = None
+) -> tuple[bool, str | None]:
+    """Close a modmail ticket thread, returning success and an optional error message."""
+
+    if not isinstance(thread, discord.Thread) or thread.parent_id != config.forum_channel_id:
+        return False, 'This channel is not a valid ticket.'
+
+    for text in (reason, user_reason, original_reason):
+        if text and len(text) > 1024:
+            return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread.id,))
+        row = res.fetchone()
+
+    if row is None:
+        return False, 'This thread is not associated with a ticket.'
+
+    user_id = row[0]
+    user: discord.User | None
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+    except (discord.NotFound, discord.HTTPException):
+        user = None
+        if not skip_confirmation:
+            buttons = YesNoButtons(60)
+            confirmation = await thread.send(
+                embed=embed_creator(
+                    'Invalid User Association',
+                    'This is probably because the user has deleted their account. Would you still like to close and log it?',
+                    'b'
+                ),
+                view=buttons
+            )
+            await buttons.wait()
+            if buttons.value is None:
+                await confirmation.edit(
+                    embed=embed_creator('Invalid User Association', 'Close cancelled due to timeout.', 'b'),
+                    view=None
+                )
+                return False, None
+            if buttons.value is False:
+                await confirmation.edit(
+                    embed=embed_creator('Invalid User Association', 'Close cancelled by moderator.', 'b'),
+                    view=None
+                )
+                return False, None
+            await confirmation.delete()
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread.id,))
+        conn.commit()
+    remove_thread_from_groups(thread.id)
+
+    await thread.send(embed=embed_creator('Closing Ticket...', '', 'b'))
+
+    try:
+        channel_messages = [message async for message in thread.history(limit=1024, oldest_first=True)]
+    except (discord.HTTPException, discord.Forbidden):
+        channel_messages = []
+    thread_messages: list[discord.Message] = []
+
+    txt_path = f'{user_id}.txt'
+    htm_path = f'{user_id}.htm'
+
+    with open(txt_path, 'w', encoding='utf-8') as txt_log:
+        for message in channel_messages:
+            if len(message.embeds) == 1:
+                embed = message.embeds[0]
+                content = embed.description or ''
+                if embed.title == 'Message Received':
+                    author_name = embed.footer.text if embed.footer else 'Unknown User'
+                    txt_log.write(
+                        f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] {author_name} (User): {content}'
+                    )
+                elif embed.title == 'Message Sent':
+                    name = embed.author.name if embed.author else 'Moderator'
+                    txt_log.write(
+                        f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] {name.strip(" (Anonymous)")} (Mod): {content}'
+                    )
+                else:
+                    continue
+                for field in embed.fields:
+                    txt_log.write(f'\n{field.value}')
+            else:
+                txt_log.write(
+                    f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name} (Comment): {message.content}'
+                )
+            txt_log.write('\n')
+        for message in thread_messages:
+            txt_log.write(
+                f'\n[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name}: {message.content}'
+            )
+
+    with open(htm_path, 'w', encoding='utf-8') as htm_log:
+        htm_log.write(
+            '''
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>''' + bot.user.name + '''Log</title>
+<style type="text/css">
+    html { }
+    body { font-size:16px; max-width:1000px; margin: 20px auto; padding:0; font-family:sans-serif; color:white; background:#2D2F33; }
+    main { font-size:1em; line-height:1.3em; }
+    p { white-space:pre-line; }
+    div { }
+    h1 { margin:25px 20px; font-weight:normal; font-size:3em; }
+    h2 { margin:5px; font-size:1em; line-height:1.3em; }
+    li.user h2 { color:lime; }
+    li.staff h2 { color:orangered; }
+    li.comment h2 { color:#6C757D; }
+    span.datetime { color:#8898AA; font-weight:normal; }
+    ul { list-style:none; padding:0; }
+    li { margin:0 0 20px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>''' + bot.user.name + ''' Ticket Log</h1>
+<ul>
+'''
+        )
+        for message in channel_messages:
+            if len(message.embeds) == 1:
+                embed = message.embeds[0]
+                if embed.title == 'Message Received':
+                    htm_class = 'user'
+                    name = html_sanitiser.clean(embed.footer.text if embed.footer else 'Unknown User')
+                elif embed.title == 'Message Sent':
+                    htm_class = 'staff'
+                    name = html_sanitiser.clean((embed.author.name if embed.author else 'Moderator').removesuffix(' (Anonymous)'))
+                else:
+                    continue
+                content = embed.description or ''
+                content = html_linkifier.clean(content)
+                for field in embed.fields:
+                    value = field.value
+                    mimetype = mimetypes.guess_type(value)[0]
+                    if mimetype:
+                        filetype = mimetype.split('/', 1)[0]
+                    else:
+                        filetype = None
+                    if content:
+                        content += '<br></br>'
+                    if filetype == 'image':
+                        if 'src=' not in value:
+                            content += f'<img src="{value}" alt="{value}">'
+                        else:
+                            content += value
+                    elif filetype == 'video':
+                        content += f'<video controls><source src="{value}" type="{mimetype}"><a href="{value}">{value}</a></video>'
+                    else:
+                        content += f'<a href="{value}">{value}</a>'
+            else:
+                htm_class = 'comment'
+                name = html_sanitiser.clean(message.author.name)
+                content = html_sanitiser.clean(message.content)
+            htm_log.write(
+                f'''<li class="{htm_class}"><h2><span class="name">{name}</span><span class="datetime">{html_sanitiser.clean(message.created_at.strftime("%y-%m-%d %H:%M"))}</span></h2><p>{content}</p></li>'''
+            )
+        htm_log.write('</ul><ul>')
+        for message in thread_messages:
+            htm_log.write(
+                f'''<li class="comment"><h2><span class="name">{html_sanitiser.clean(message.author.name)}</span><span class="datetime">{html_sanitiser.clean(message.created_at.strftime("%y-%m-%d %H:%M"))}</span></h2><p>{html_linkifier.clean(message.content)}</p></li>'''
+            )
+        htm_log.write('</ul></main></body></html>')
+
+    guild = thread.guild or bot.get_guild(config.guild_id)
+    embed_user = embed_creator('Ticket Closed', config.close_message, 'b', guild, time=True)
+    embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=log_anon)
+
+    final_user_reason = user_reason if user_reason is not None else reason
+    if final_user_reason:
+        embed_user.add_field(name='Reason', value=final_user_reason, inline=False)
+    if reason:
+        embed_guild.add_field(name='Reason', value=reason, inline=False)
+    if original_reason and original_reason != final_user_reason:
+        embed_user.add_field(name='Original Reason', value=original_reason, inline=False)
+        embed_guild.add_field(name='Original Reason', value=original_reason, inline=False)
+    if translation_notice:
+        icon_url = embed_user.footer.icon_url if embed_user.footer else None
+        embed_user.set_footer(text=translation_notice, icon_url=icon_url)
+
+    summary = None
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as summary_file:
+            transcript = summary_file.read()
+        if transcript.strip():
+            response = await openai_client.chat.completions.create(
+                model='gpt-4o',
+                messages=[
+                    {
+                        'role': 'system',
+                        'content': 'Summarise the following ticket conversation in under 100 words.'
+                    },
+                    {'role': 'user', 'content': transcript}
+                ]
+            )
+            summary = response.choices[0].message.content.strip()
+    except Exception:
+        summary = None
+    if summary:
+        embed_guild.add_field(name='AI Summary', value=summary[:1024], inline=False)
+    embed_guild.add_field(name='User', value=f'<@{user_id}> ({user_id})', inline=False)
+
+    log_channel = require_text_channel(config.log_channel_id, 'log')
+    log = await log_channel.send(
+        embed=embed_guild,
+        files=[
+            discord.File(txt_path, filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.txt'),
+            discord.File(htm_path, filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')
+        ]
+    )
+
+    with sqlite3.connect('logs.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'INSERT INTO logs VALUES (?, ?, ?, ?)',
+            (user_id, int(thread.created_at.timestamp()), log.attachments[0].url, log.attachments[1].url)
+        )
+        conn.commit()
+
+    await thread.delete()
+    await update_forum_name()
+
+    try:
+        os.remove(txt_path)
+        os.remove(htm_path)
+    except OSError:
+        pass
+
+    if user is not None:
+        try:
+            await user.send(embed=embed_user)
+        except discord.Forbidden:
+            pass
+
+    return True, None
 
 
 async def send_message(message, text, anon):
-    recipients = get_broadcast_recipients_for_aggregator(message.channel.id)
-    if recipients:
-        try:
-            attachments = await gather_attachment_payloads(message.attachments, 8000000)
-        except ValueError as attachment_name:
-            await message.channel.send(
-                embed=embed_creator('Failed to Send', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e')
-            )
-            await message.delete()
-            return
-        guild = message.guild or bot.get_guild(config.guild_id)
-        await dispatch_broadcast_message(
-            message.channel,
-            message.author,
-            guild,
-            text,
-            anon,
-            attachments,
-            recipients,
-            original_message=message
-        )
-        return
-
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
@@ -827,14 +1029,6 @@ async def send_message(message, text, anon):
         file[0].seek(0)
         files_to_send.append(discord.File(file[0], file[1]))
     await message.channel.send(embed=channel_embed, files=files_to_send)
-    await mirror_mod_reply_to_broadcasts(
-        message.channel,
-        user,
-        text,
-        message.author,
-        anon,
-        buffers_to_payloads(files)
-    )
 
 # New feature: translate user messages to English for moderators
 # First detect the language using AI, translating only when necessary
@@ -918,31 +1112,6 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
     """Send a message translated for the recipient along with the original."""
     translated = await translate_to_language(text, language)
     notice = await get_translation_notice(language)
-    recipients = get_broadcast_recipients_for_aggregator(message.channel.id)
-    if recipients:
-        try:
-            attachments = await gather_attachment_payloads(message.attachments, 8000000)
-        except ValueError as attachment_name:
-            await message.channel.send(
-                embed=embed_creator('Failed to Send', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e')
-            )
-            await message.delete()
-            return
-        guild = message.guild or bot.get_guild(config.guild_id)
-        await dispatch_broadcast_message(
-            message.channel,
-            message.author,
-            guild,
-            translated,
-            anon,
-            attachments,
-            recipients,
-            original_message=message,
-            translated_text=translated,
-            original_text=text,
-            translation_notice=notice
-        )
-        return
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
@@ -997,17 +1166,6 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         file[0].seek(0)
         files_to_send.append(discord.File(file[0], file[1]))
     await message.channel.send(embed=channel_embed, files=files_to_send)
-    await mirror_mod_reply_to_broadcasts(
-        message.channel,
-        user,
-        translated,
-        message.author,
-        anon,
-        buffers_to_payloads(files),
-        translated=True,
-        original_text=text,
-        translation_notice=notice
-    )
 
 
 @bot.event
@@ -1112,8 +1270,6 @@ async def on_message(message):
 
         if ticket_create:
             await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
-
-        await mirror_user_message_to_broadcasts(channel, message.author, message.content, message.attachments)
 
     # Message from mod to user.
     else:
@@ -1244,27 +1400,31 @@ async def send(ctx, user: discord.User, *, message: str = ''):
     await ctx.channel.send(embed=embed_creator('New Message Sent', f'Ticket: {ticket_channel.mention}', 'r', time=False))
 
 
-# Feature: broadcast allows moderators to coordinate announcements across multiple tickets via a pinned forum thread.
-@bot.command()
-@commands.guild_only()
-@commands.check(is_mod)
-async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str = ''):
-    """Create a broadcast coordination thread and deliver a message to several users at once."""
+# Feature: centralise group replies so variants (anon/translated) reuse the same workflow.
+async def execute_group_reply(
+    ctx: commands.Context,
+    group_name: str,
+    message: str,
+    *,
+    anon: bool,
+    summary_title: str,
+    language: str | None = None,
+    extra_fields: list[tuple[str, str]] | None = None
+) -> None:
+    """Shared implementation for replymany-style commands."""
 
-    unique_users: list[discord.User] = []
-    seen_ids: set[int] = set()
-    for user in users:
-        if user.id in seen_ids:
-            continue
-        seen_ids.add(user.id)
-        unique_users.append(user)
+    cleaned_group = group_name.strip()
+    if not cleaned_group:
+        await ctx.send(embed=embed_creator('', 'Provide the group name you want to reply to.', 'e'))
+        return
 
-    if not unique_users:
-        await ctx.send(embed=embed_creator('', 'Provide at least one user to broadcast to.', 'e'))
+    thread_ids = get_group_threads(cleaned_group)
+    if not thread_ids:
+        await ctx.send(embed=embed_creator('', f'No tickets are tracked for `{cleaned_group}`.', 'e'))
         return
 
     if not message and not ctx.message.attachments:
-        await ctx.send(embed=embed_creator('', 'Broadcasts must include a message or an attachment.', 'e'))
+        await ctx.send(embed=embed_creator('', 'Provide a message or at least one attachment to send.', 'e'))
         return
 
     try:
@@ -1273,109 +1433,417 @@ async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str =
         await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
         return
 
-    forum_channel = bot.get_channel(config.forum_channel_id)
-    if forum_channel is None or not isinstance(forum_channel, discord.ForumChannel):
-        await ctx.send(embed=embed_creator('', 'Configured forum channel is missing or invalid.', 'e'))
-        return
+    outbound_text = message or '\u200b'
+    original_text = None
+    translation_notice = None
+    if language:
+        if message:
+            outbound_text = await translate_to_language(message, language)
+            translation_notice = await get_translation_notice(language)
+            original_text = message
+        else:
+            outbound_text = '\u200b'
 
-    recipients: list[tuple[int, int]] = []
-    setup_failures: list[str] = []
-    prepared_users: list[discord.User] = []
+    delivered: list[str] = []
+    failures: list[str] = []
 
-    for user in unique_users:
-        if user == bot.user:
-            setup_failures.append(f'Cannot broadcast to {bot.user.mention}.')
-            continue
-        if ctx.guild not in user.mutual_guilds:
-            setup_failures.append(f'{user.mention} is not in this guild.')
+    for thread_id in thread_ids:
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            remove_thread_from_groups(thread_id)
+            failures.append(f'Ticket thread `{thread_id}` no longer exists.')
             continue
 
         with sqlite3.connect('tickets.db') as conn:
             curs = conn.cursor()
-            res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (user.id, ))
-            channel_row = res.fetchone()
+            res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (thread_id,))
+            row = res.fetchone()
 
-        thread: discord.Thread | None = None
-        if channel_row:
-            thread_id = channel_row[0]
-            thread = await resolve_thread(thread_id)
-            if thread is None:
-                with sqlite3.connect('tickets.db') as conn:
-                    curs = conn.cursor()
-                    curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread_id,))
-                    conn.commit()
-                thread = None
+        if row is None:
+            remove_thread_from_groups(thread_id)
+            failures.append(f'{thread.mention}: not linked to a user.')
+            continue
 
-        if thread is None:
-            thread = await ticket_creator(user, ctx.guild)
+        user_id = row[0]
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        except discord.HTTPException:
+            failures.append(f'{thread.mention}: unable to fetch user `{user_id}`.')
+            continue
+
+        try:
+            thread = await ensure_thread_open(thread)
+        except discord.HTTPException:
+            failures.append(f'{thread.mention}: cannot reopen thread.')
+            continue
+
+        success, error = await deliver_modmail_payload(
+            user,
+            thread,
+            thread.guild or ctx.guild,
+            ctx.author,
+            outbound_text,
+            anon,
+            attachments,
+            original_text=original_text,
+            translation_notice=translation_notice if original_text else None,
+        )
+        if success:
+            delivered.append(thread.mention)
         else:
-            await ensure_thread_open(thread)
+            failures.append(f'{thread.mention}: {error}')
 
-        recipients.append((user.id, thread.id))
-        prepared_users.append(user)
+    summary = embed_creator(
+        summary_title,
+        f'Sent to {len(delivered)} ticket(s).',
+        'g' if not failures else 'b',
+        ctx.guild,
+        ctx.author,
+        anon=False
+    )
+    if delivered:
+        summary.add_field(name='Updated Tickets', value='\n'.join(delivered)[:1024], inline=False)
+    if failures:
+        summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
+    if extra_fields:
+        for name, value in extra_fields:
+            summary.add_field(name=name, value=value, inline=False)
 
-    if not recipients:
-        await ctx.send(embed=embed_creator('', 'No valid recipients were available for the broadcast.', 'e'))
+    await ctx.send(embed=summary)
+
+
+# Feature: sendmany sends a shared message to several users and tags their tickets for follow-up management.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
+    """Create or reuse tickets for multiple IDs, send a shared anonymous note, and tag them."""
+
+    cleaned_group = group_name.strip()
+    if not cleaned_group:
+        await ctx.send(embed=embed_creator('', 'Provide a group name for the temporary tag.', 'e'))
         return
 
-    if 'SEVEN_DAY_THREAD_ARCHIVE' in ctx.guild.features:
-        duration = 10080
-    elif 'THREE_DAY_THREAD_ARCHIVE' in ctx.guild.features:
-        duration = 4320
-    else:
-        duration = 1440
+    raw_ids = [chunk.strip() for chunk in ids.split(',')]
+    parsed_ids: list[int] = []
+    invalid_chunks: list[str] = []
+    for chunk in raw_ids:
+        if not chunk:
+            continue
+        try:
+            parsed_ids.append(int(chunk))
+        except ValueError:
+            invalid_chunks.append(chunk)
 
-    timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-    recipients_chunks: list[str] = []
-    current_chunk = ''
-    for user in prepared_users:
-        line = f'{user.mention} ({user.id})\n'
-        if len(current_chunk) + len(line) > 1000:
-            recipients_chunks.append(current_chunk)
-            current_chunk = ''
-        current_chunk += line
-    if current_chunk:
-        recipients_chunks.append(current_chunk)
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for user_id in parsed_ids:
+        if user_id not in seen:
+            seen.add(user_id)
+            unique_ids.append(user_id)
 
-    summary_embed = embed_creator(
-        'Send to All',
-        'Use this thread to coordinate follow ups. Messages posted here reach every linked ticket.',
-        'b',
-        ctx.guild,
-        ctx.author,
-        anon=False,
-        time=True
-    )
-    for index, chunk in enumerate(recipients_chunks, start=1):
-        name = 'Recipients' if len(recipients_chunks) == 1 else f'Recipients (Part {index})'
-        summary_embed.add_field(name=name, value=chunk, inline=False)
+    if not unique_ids:
+        await ctx.send(embed=embed_creator('', 'No valid user IDs were provided.', 'e'))
+        return
 
-    thread_name = f'Send to All {timestamp}'
-    broadcast_thread = await forum_channel.create_thread(
-        name=thread_name,
-        embed=summary_embed,
-        auto_archive_duration=duration
-    )
-    await broadcast_thread.edit(pinned=True)
+    if not message and not ctx.message.attachments:
+        await ctx.send(embed=embed_creator('', 'Provide a message or at least one attachment to send.', 'e'))
+        return
 
-    for user_id, thread_id in recipients:
-        link_broadcast_thread(broadcast_thread.id, user_id, thread_id)
+    try:
+        attachments = await gather_attachment_payloads(ctx.message.attachments, 8000000)
+    except ValueError as attachment_name:
+        await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
+        return
 
-    await dispatch_broadcast_message(
-        broadcast_thread,
-        ctx.author,
-        ctx.guild,
+    try:
+        _, group_tag = await ensure_group_tag(cleaned_group)
+    except (ValueError, RuntimeError) as exc:
+        await ctx.send(embed=embed_creator('', str(exc), 'e'))
+        return
+
+    delivered: list[str] = []
+    failures: list[str] = []
+
+    for user_id in unique_ids:
+        if user_id == bot.user.id:
+            failures.append('Cannot send messages to the bot account.')
+            continue
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        except discord.HTTPException:
+            failures.append(f'User `{user_id}` could not be fetched.')
+            continue
+
+        if ctx.guild.get_member(user_id) is None:
+            failures.append(f'{user.mention} is not in this guild.')
+            continue
+
+        try:
+            thread = await get_or_create_ticket_for_user(user, ctx.guild)
+        except discord.HTTPException:
+            failures.append(f'Unable to open a ticket for {user.mention}.')
+            continue
+
+        success, error = await deliver_modmail_payload(
+            user,
+            thread,
+            ctx.guild,
+            ctx.author,
+            message or '\u200b',
+            True,
+            attachments,
+        )
+        if not success:
+            failures.append(f'{user.mention}: {error}')
+            continue
+
+        try:
+            await apply_group_tag(thread, group_tag)
+        except discord.HTTPException:
+            failures.append(f'{user.mention}: failed to apply group tag.')
+            continue
+
+        add_thread_to_group(cleaned_group, thread.id)
+        delivered.append(thread.mention)
+
+    summary = embed_creator('Send Many', f'Delivered to {len(delivered)} ticket(s).', 'g' if not failures else 'b', ctx.guild, ctx.author, anon=False)
+    if delivered:
+        summary.add_field(name='Tagged Tickets', value='\n'.join(delivered)[:1024], inline=False)
+    if invalid_chunks:
+        failures.extend([f'`{value}` is not a valid user ID.' for value in invalid_chunks])
+    if failures:
+        summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
+    await ctx.send(embed=summary)
+
+
+# Feature: replymany lets helpers send the same reply to every ticket tagged with a group name.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def replymany(ctx, group_name: str, *, message: str = ''):
+    """Reply non-anonymously to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(ctx, group_name, message, anon=False, summary_title='Reply Many')
+
+
+# Feature: provide an anonymous variant of replymany for sensitive moderator messaging.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def areplymany(ctx, group_name: str, *, message: str = ''):
+    """Reply anonymously to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(ctx, group_name, message, anon=True, summary_title='Anonymous Reply Many')
+
+
+# Feature: translate bulk replies so teams can answer in a requested language.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def replytmany(ctx, group_name: str, language: str, *, message: str = ''):
+    """Reply in a translated language to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(
+        ctx,
+        group_name,
         message,
-        True,
-        attachments,
-        recipients
+        anon=False,
+        summary_title='Translated Reply Many',
+        language=language,
+        extra_fields=[('Language', language)]
     )
 
-    confirmation = embed_creator('Broadcast Created', f'Broadcast thread {broadcast_thread.mention} is live.', 'g', ctx.guild)
-    if setup_failures:
-        failure_text = '\n'.join(setup_failures)
-        confirmation.add_field(name='Not Included', value=failure_text[:1024], inline=False)
-    await ctx.send(embed=confirmation)
+
+# Feature: anonymous translated bulk replies for privacy-conscious follow-ups.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def areplytmany(ctx, group_name: str, language: str, *, message: str = ''):
+    """Reply anonymously in another language to every ticket associated with the supplied tag."""
+
+    await execute_group_reply(
+        ctx,
+        group_name,
+        message,
+        anon=True,
+        summary_title='Anonymous Translated Reply Many',
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
+
+# Feature: centralise closemany variants for anonymous and translated clean-up flows.
+async def execute_group_close(
+    ctx: commands.Context,
+    group_name: str,
+    reason: str,
+    *,
+    summary_title: str,
+    log_anon: bool = False,
+    language: str | None = None,
+    extra_fields: list[tuple[str, str]] | None = None
+) -> None:
+    """Shared implementation for closemany-style commands."""
+
+    cleaned_group = group_name.strip()
+    if not cleaned_group:
+        await ctx.send(embed=embed_creator('', 'Provide the group name you want to close.', 'e'))
+        return
+
+    thread_ids = get_group_threads(cleaned_group)
+    if not thread_ids:
+        await ctx.send(embed=embed_creator('', f'No tickets are tracked for `{cleaned_group}`.', 'e'))
+        return
+
+    if len(reason) > 1024:
+        await ctx.send(embed=embed_creator('', 'Reason too long: the maximum length for closing reasons is 1024 characters.', 'e'))
+        return
+
+    try:
+        forum_channel = await require_forum_channel()
+    except RuntimeError as exc:
+        await ctx.send(embed=embed_creator('', str(exc), 'e'))
+        return
+
+    tag = None
+    for candidate in forum_channel.available_tags:
+        if candidate.name.lower() == cleaned_group.lower():
+            tag = candidate
+            break
+
+    user_reason_override: str | None = None
+    original_reason: str | None = None
+    translation_notice: str | None = None
+    if language and reason:
+        translated_reason = await translate_to_language(reason, language)
+        if len(translated_reason) > 1024:
+            await ctx.send(embed=embed_creator('', 'Translated reason too long: the maximum length is 1024 characters.', 'e'))
+            return
+        translation_notice = await get_translation_notice(language)
+        user_reason_override = translated_reason
+        original_reason = reason
+    elif language:
+        translation_notice = None
+
+    closed: list[str] = []
+    failures: list[str] = []
+
+    for thread_id in thread_ids:
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            remove_thread_from_groups(thread_id)
+            failures.append(f'Ticket thread `{thread_id}` no longer exists.')
+            continue
+
+        success, error = await close_ticket_thread(
+            thread,
+            ctx.author,
+            reason,
+            skip_confirmation=True,
+            log_anon=log_anon,
+            user_reason=user_reason_override,
+            original_reason=original_reason,
+            translation_notice=translation_notice if user_reason_override else None
+        )
+        if success:
+            closed.append(f'`{thread_id}`')
+        elif error:
+            failures.append(f'{thread.mention}: {error}')
+
+    remove_group(cleaned_group)
+
+    if tag is not None:
+        await asyncio.sleep(1)
+        try:
+            refreshed_forum = await require_forum_channel()
+        except RuntimeError:
+            refreshed_forum = None
+        if refreshed_forum is not None:
+            refreshed_tag = None
+            for candidate in refreshed_forum.available_tags:
+                if candidate.name.lower() == cleaned_group.lower():
+                    refreshed_tag = candidate
+                    break
+            if refreshed_tag is not None:
+                deleted = await delete_group_tag(refreshed_forum, refreshed_tag)
+                if not deleted:
+                    failures.append(f'Failed to delete tag `{cleaned_group}`; please remove it manually.')
+        else:
+            failures.append(f'Unable to confirm deletion for tag `{cleaned_group}`.')
+
+    summary = embed_creator(
+        summary_title,
+        f'Closed {len(closed)} ticket(s).',
+        'g' if not failures else 'b',
+        ctx.guild,
+        ctx.author,
+        anon=False
+    )
+    if closed:
+        summary.add_field(name='Closed Tickets', value='\n'.join(closed)[:1024], inline=False)
+    if failures:
+        summary.add_field(name='Issues', value='\n'.join(failures)[:1024], inline=False)
+    if extra_fields:
+        for name, value in extra_fields:
+            summary.add_field(name=name, value=value, inline=False)
+
+    await ctx.send(embed=summary)
+
+
+# Feature: closemany bulk-closes tagged tickets and removes the temporary forum tag afterwards.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def closemany(ctx, group_name: str, *, reason: str = ''):
+    """Close every ticket associated with the supplied group tag and remove the tag."""
+
+    await execute_group_close(ctx, group_name, reason, summary_title='Close Many')
+
+
+# Feature: anonymous bulk closing for moderators who need additional privacy.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def aclosemany(ctx, group_name: str, *, reason: str = ''):
+    """Close group-tagged tickets while hiding the acting moderator in logs."""
+
+    await execute_group_close(ctx, group_name, reason, summary_title='Anonymous Close Many', log_anon=True)
+
+
+# Feature: translated closing reasons for all tagged tickets in a group.
+@bot.command(name='clostmany', aliases=['closetmany'])
+@commands.guild_only()
+@commands.check(is_helper)
+async def clostmany(ctx, group_name: str, language: str, *, reason: str = ''):
+    """Close group-tagged tickets with a translated reason for users."""
+
+    await execute_group_close(
+        ctx,
+        group_name,
+        reason,
+        summary_title='Translated Close Many',
+        language=language,
+        extra_fields=[('Language', language)]
+    )
+
+
+# Feature: anonymous translated closures to pair privacy with localisation.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def aclosetmany(ctx, group_name: str, language: str, *, reason: str = ''):
+    """Close group-tagged tickets anonymously while translating the reason."""
+
+    await execute_group_close(
+        ctx,
+        group_name,
+        reason,
+        summary_title='Anonymous Translated Close Many',
+        log_anon=True,
+        language=language,
+        extra_fields=[('Language', language)]
+    )
 
 
 @bot.command()
@@ -1387,265 +1855,9 @@ async def close(ctx, *, reason: str = ''):
         await ctx.send(embed=embed_creator('', 'This channel is not a valid ticket.', 'e'))
         return
 
-    if len(reason) > 1024:
-        await ctx.send(embed=embed_creator('', f'Reason too long: `{len(reason)}` characters. The maximum length for closing reasons is 1024.', 'e'))
-        return
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (ctx.channel.id, ))
-        user_id = res.fetchone()
-
-    if not user_id:
-        recipients = get_broadcast_recipients_for_aggregator(ctx.channel.id)
-        if recipients:
-            unlink_aggregator(ctx.channel.id)
-            await ctx.send(
-                embed=embed_creator(
-                    'Broadcast Closed',
-                    'This broadcast coordination thread has been closed. Linked tickets remain open for follow ups.',
-                    'r',
-                    ctx.guild,
-                    ctx.author,
-                    anon=False
-                )
-            )
-            await ctx.channel.delete()
-            return
-        await ctx.send(embed=embed_creator('', 'This thread is not associated with a ticket.', 'e'))
-        return
-
-    error_message = ('Database Corrupted', 'This ticket is unlikely to be fixable. Would you still like to close and log it?')
-
-    try:
-        if user_id:
-            error_message = ('Invalid User Association', 'This is probably because the user has deleted their account. Would you still like to close and log the ticket?')
-        user_id = user_id[0]
-        user = bot.get_user(user_id)
-        if user is None:
-            user = await bot.fetch_user(user_id)
-    except (ValueError, TypeError, discord.NotFound):
-        user = None
-        buttons = YesNoButtons(60)
-        confirmation = await ctx.send(embed=embed_creator(*error_message,'b'), view=buttons)
-        await buttons.wait()
-        if buttons.value is None:
-            await confirmation.edit(embed=embed_creator(error_message[0], 'Close cancelled due to timeout.',
-                                                        'b'), view=None)
-            return
-        if buttons.value is False:
-            await confirmation.edit(embed=embed_creator(error_message[0], 'Close cancelled by moderator.',
-                                                        'b'), view=None)
-            return
-        await confirmation.delete()
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute('DELETE FROM tickets WHERE channel_id=?', (ctx.channel.id, ))
-        conn.commit()
-    unlink_thread_from_broadcasts(ctx.channel.id)
-
-
-    await ctx.send(embed=embed_creator('Closing Ticket...', '', 'b'))
-
-    # Logging
-
-
-    try:
-        channel_messages = [message async for message in ctx.channel.history(limit=1024, oldest_first=True)]
-    except (discord.HTTPException, discord.Forbidden):
-        channel_messages = []
-    thread_messages = []
-
-    with open(f'{user_id}.txt', 'w', encoding='utf-8') as txt_log:
-        for message in channel_messages:
-            if len(message.embeds) == 1:
-
-                if message.embeds[0].description is None:
-                    content = ''
-                else:
-                    content = message.embeds[0].description
-
-                if message.embeds[0].title == 'Message Received':
-                    txt_log.write(f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.embeds[0].footer.text} '
-                                  f'(User): {content}')
-                elif message.embeds[0].title == 'Message Sent':
-                    txt_log.write(f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] '
-                                  f'{message.embeds[0].author.name.strip(" (Anonymous)")} (Mod): {content}')
-                else:
-                    continue
-
-                for field in message.embeds[0].fields:
-                    txt_log.write(f'\n{field.value}')
-
-            else:
-                txt_log.write(f'[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name} (Comment): '
-                              f'{message.content}')
-            txt_log.write('\n')
-        for message in thread_messages:
-            txt_log.write(f'\n[{message.created_at.strftime("%y-%m-%d %H:%M")}] {message.author.name}: '
-                          f'{message.content}')
-
-    with open(f'{user_id}.htm', 'w', encoding='utf-8') as htm_log:
-        htm_log.write(
-            '''
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>'''+bot.user.name+'''Log</title>
-<style type="text/css">
-    html { }
-    body { font-size:16px; max-width:1000px; margin: 20px auto; padding:0; font-family:sans-serif; color:white; background:#2D2F33; }
-    main { font-size:1em; line-height:1.3em; }
-    p { white-space:pre-line; }
-    div { }
-    h1 { margin:25px 20px; font-weight:normal; font-size:3em; }
-    h2 { margin:5px; font-size:1em; line-height:1.3em; }
-    li.user h2 { color:lime; }
-    li.staff h2 { color:orangered; }
-    li.comment h2 { color:#6C757D; }
-    span.datetime { color:#8898AA; font-weight:normal; }
-    p { margin:5px; padding:0; }
-    ul { margin-bottom: 50px; padding:0; list-style-type:none; }
-    li { margin:5px; padding:15px; list-style-type:none; background:#222529; border-radius:5px; }
-    img { max-width:100%; }
-    video { max-width:100%; }
-</style>
-<script async src='/cdn-cgi/bm/cv/669835187/api.js'></script></head>
-<body>
-<h1>'''+bot.user.name+'''</h1>
-<main>        
-    <ul>
-            '''
-        )
-        for message in channel_messages:
-            if len(message.embeds) == 1:
-                if message.embeds[0].title == 'Message Received':
-                    htm_class = 'user'
-                    name = html_sanitiser.clean(message.embeds[0].footer.text)
-                elif message.embeds[0].title == 'Message Sent':
-                    htm_class = 'staff'
-                    name = html_sanitiser.clean(message.embeds[0].author.name.removesuffix(' (Anonymous)'))
-                else:
-                    continue
-                if message.embeds[0].description is None:
-                    content = ''
-                else:
-                    content = html_linkifier.clean(message.embeds[0].description)
-                for i in range(len(message.embeds[0].fields)):
-                    value = message.embeds[0].fields[i].value
-                    mimetype = mimetypes.guess_type(value)[0]
-                    if mimetype is not None:
-                        filetype = mimetype.split('/', 1)[0]
-                    else:
-                        filetype = None
-                    if i > 0 or content != '':
-                        content += '<br></br>'
-                    if filetype == 'image':
-                        content += f'<img src="{value}" alt="{value}">'
-                    elif filetype == 'video':
-                        content += f'<video controls><source src="{value}" type="{mimetype}"><a href="{value}">{value}</a></video>'
-                    else:
-                        content += f'<a href="{value}">{value}</a>'
-            else:
-                htm_class = 'comment'
-                name = html_sanitiser.clean(message.author.name)
-                content = html_sanitiser.clean(message.content)
-            htm_log.write(
-                f'''
-                <li class="{htm_class}">
-                <h2>
-                    <span class="name">
-                        {name}
-                    </span>
-                    <span class="datetime">
-                        {html_sanitiser.clean(message.created_at.strftime("%y-%m-%d %H:%M"))}
-                    </span>
-                </h2>
-                <p>{content}</p>
-                </li>
-                '''
-            )
-        htm_log.write('</ul><ul>')
-        for message in thread_messages:
-            htm_log.write(
-                f'''
-                <li class="comment">
-                <h2>
-                    <span class="name">
-                        {html_sanitiser.clean(message.author.name)}
-                    </span>
-                    <span class="datetime">
-                        {html_sanitiser.clean(message.created_at.strftime("%y-%m-%d %H:%M"))}
-                    </span>
-                </h2>
-                <p>{html_linkifier.clean(message.content)}</p>
-                </li>
-                '''
-            )
-        htm_log.write(
-            '''
-            </ul>
-            </main>
-            <script type="text/javascript">(function(){window['__CF$cv$params']={r:'6da5e8aa0d2172b5',m:'5dLd8.V25IY9gxywoWGKAj7j56QuVn7rur_rHLA1vRY-1644334327-0-AVXmbc6H8HGCfutFMct5cXfa2ZWp0QzIf62ZswYauMCDY5i6r0yH+dRdT2hMg/cTdi9wztDqs4wX3uYu3jlk2xaN/6gYwMbw57+MdRSBJvnkIxd2V2D/VEqQMEfedSczOkFaueNElC0lK5ZgSXq8SKW8U04f95BRGScgpFlUSozUEGpQFejg6K2xskUm4J/77g==',s:[0xf5207b6be0,0xa06951a27f],}})();
-            </script>
-            </body>
-            </html>
-            '''
-        )
-    embed_user = embed_creator('Ticket Closed', config.close_message, 'b', ctx.guild, time=True)
-    embed_guild = embed_creator('Ticket Closed', '', 'r', user, ctx.author, anon=False)
-    # New feature: uses GPT-4o to summarise the ticket for moderators
-    summary = None
-    try:
-        with open(f'{user_id}.txt', 'r', encoding='utf-8') as summary_file:
-            transcript = summary_file.read()
-        if transcript.strip():
-            response = await openai_client.chat.completions.create(
-                model='gpt-4o',
-                messages=[
-                    {
-                        'role': 'system',
-                        'content': 'Summarise the following ticket conversation in under 100 words.'
-                    },
-                    {'role': 'user', 'content': transcript}
-                ]
-            )
-            summary = response.choices[0].message.content.strip()
-    except Exception:
-        summary = None
-    if reason:
-        embed_user.add_field(name='Reason', value=reason)
-        embed_guild.add_field(name='Reason', value=reason)
-    if summary:
-        embed_guild.add_field(name='AI Summary', value=summary[:1024], inline=False)
-    embed_guild.add_field(name='User', value=f'<@{user_id}> ({user_id})', inline=False)
-    log_channel = require_text_channel(config.log_channel_id, 'log')
-    log = await log_channel.send(embed=embed_guild, files=[discord.File(f'{user_id}.txt',
-                                                                       filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.txt'),
-                                                          discord.File(f'{user_id}.htm',
-                                                                       filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')])
-
-
-    with sqlite3.connect('logs.db') as conn:
-        curs = conn.cursor()
-        curs.execute('INSERT INTO logs VALUES (?, ?, ?, ?)',
-                     (user_id, int(ctx.channel.created_at.timestamp()), log.attachments[0].url, log.attachments[1].url))
-        conn.commit()
-
-
-    await ctx.channel.delete()
-    await update_forum_name()
-
-    os.remove(f'{user_id}.txt')
-    os.remove(f'{user_id}.htm')
-    if user is not None:
-        try:
-            await user.send(embed=embed_user)
-        except discord.Forbidden:
-            pass
+    success, error = await close_ticket_thread(ctx.channel, ctx.author, reason)
+    if not success and error:
+        await ctx.send(embed=embed_creator('', error, 'e'))
 
 
 @bot.command()
@@ -1961,8 +2173,7 @@ async def on_thread_create(thread):
 async def on_thread_delete(thread):
     """Update the forum title when a ticket thread is removed."""
     if thread.parent_id == config.forum_channel_id:
-        unlink_thread_from_broadcasts(thread.id)
-        unlink_aggregator(thread.id)
+        remove_thread_from_groups(thread.id)
         await update_forum_name()
 
 
