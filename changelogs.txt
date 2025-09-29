@@ -1,4 +1,8 @@
 
+* Removed the broadcast forum workflow and its commands in favor of simpler group-tag automation.
+* Added `!sendmany`, `!replymany`, and `!closemany` commands for sending, replying, and closing groups of tickets via temporary tags.
+* Persisted group tag membership in the database and clean up tags automatically when tickets close.
+* Refactored ticket closure into a reusable helper so every close path shares the same logging, transcript, and DM flow.
 * Ensured newly created ticket threads are fetched before use so the first DM no longer fails with Unknown Channel errors.
 * Reduced the delay on opening DMs by scheduling forum title updates asynchronously and preventing them from blocking ticket creation.
 * Fixed the forum title counter so it no longer appends duplicate numbers when Discord slugifies the channel name.
