@@ -229,18 +229,20 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
 
         thread_embed = embed_creator('New Ticket', '', 'b', user, time=True)
         thread_embed.add_field(name='User', value=f'{user.mention} ({user.id})')
-        thread = await forum_channel.create_thread(
+        created_thread = await forum_channel.create_thread(
             name=ticket_name,
             embed=thread_embed,
             auto_archive_duration=duration
         )
+        thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
     except discord.HTTPException as e:
         if 'Contains words not allowed for servers in Server Discovery' in e.text:
-            thread = await forum_channel.create_thread(
+            created_thread = await forum_channel.create_thread(
                 name='ticket',
                 embed=thread_embed,
                 auto_archive_duration=duration
             )
+            thread = created_thread.thread if hasattr(created_thread, 'thread') else created_thread
         else:
             raise e from None
 
