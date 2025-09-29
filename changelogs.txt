@@ -1,3 +1,9 @@
+* Added a `!broadcast` command that creates pinned "Send to All" threads, links them to selected tickets, and mirrors every reply across all recipients.
+* Restored the dedicated `category_id` config entry so deployments can keep the legacy identifier alongside the new forum channel settings.
+* Moved ticket handling to a single forum channel with threads and keep the forum name in sync with the open ticket count.
+* Added validation ensuring the configured modmail log channel is a regular text channel and documented the requirement.
+* Updated configuration to use `forum_channel_id` (with legacy support) and refreshed the README/template instructions.
+* Archived ticket threads are now treated as closed so a fresh thread is created instead of reopening them, keeping the workflow identical to the old channel-based system.
 * Added GPT-4o ticket summary in closed ticket logs.
 * Translated incoming messages to English when relayed to moderators.
 * Added replyTranslate and areplyTranslate commands for sending translated replies.
