@@ -116,7 +116,7 @@ def normalise_config_keys(data: dict) -> dict:
     return data
 
 
-with open('config.json', 'r') as config_file:
+with open('config.json', 'r', encoding='utf-8') as config_file:
     config = Config(**normalise_config_keys(json.load(config_file)))
 
 
@@ -1901,7 +1901,7 @@ async def ping(ctx):
 async def refresh(ctx):
     """Re-reads the external config file"""
 
-    with open('config.json', 'r') as file:
+    with open('config.json', 'r', encoding='utf-8') as file:
 
         config.update(normalise_config_keys(json.load(file)))
     await ctx.message.add_reaction('\u2705')
