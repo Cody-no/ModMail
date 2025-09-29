@@ -81,6 +81,7 @@ class Config:
     token: str
     guild_id: int
     category_id: int
+    forum_channel_id: int
     log_channel_id: int
     error_channel_id: int
     helper_role_id: int
@@ -102,8 +103,18 @@ class Config:
         self.channel_ids = [self.log_channel_id, self.error_channel_id]
 
 
+def normalise_config_keys(data: dict) -> dict:
+    """Allow legacy configs to keep working while migrating to the forum-based system."""
+    data = data.copy()
+    if 'forum_channel_id' not in data and 'category_id' in data:
+        data['forum_channel_id'] = data['category_id']
+    if 'category_id' not in data and 'forum_channel_id' in data:
+        data['category_id'] = data['forum_channel_id']
+    return data
+
+
 with open('config.json', 'r') as config_file:
-    config = Config(**json.load(config_file))
+    config = Config(**normalise_config_keys(json.load(config_file)))
 
 # Override sensitive values from environment
 config.token = os.getenv('DISCORD_TOKEN', config.token)
@@ -143,6 +154,12 @@ with sqlite3.connect('logs.db') as connection:
 with sqlite3.connect('tickets.db') as connection:
     cursor = connection.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS tickets (user_id, channel_id)')
+    # Feature: maintain broadcast thread relationships linking aggregator threads to recipient tickets.
+    cursor.execute(
+        'CREATE TABLE IF NOT EXISTS broadcast_links (aggregator_id INTEGER, user_id INTEGER, thread_id INTEGER, '
+        'PRIMARY KEY (aggregator_id, user_id))'
+    )
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_broadcast_thread ON broadcast_links(thread_id)')
     connection.commit()
 
 
@@ -180,7 +197,22 @@ def embed_creator(title, message, colour=None, subject=None, author=None, anon=T
     return embed
 
 
+def unwrap_created_thread(created_thread):
+    """Return the discord.Thread instance from a ForumChannel.create_thread response."""
+
+    thread_candidate = getattr(created_thread, 'thread', None)
+    if isinstance(thread_candidate, discord.Thread):
+        return thread_candidate
+    if isinstance(created_thread, discord.Thread):
+        return created_thread
+    raise RuntimeError('Forum thread creation returned an unexpected object without a thread.')
+
+
 async def ticket_creator(user: discord.User, guild: discord.Guild):
+    forum_channel = bot.get_channel(config.forum_channel_id)
+    if forum_channel is None or not isinstance(forum_channel, discord.ForumChannel):
+        raise RuntimeError('Configured modmail forum channel is missing or is not a forum.')
+
     try:
         if config.anonymous_tickets:
             ticket_name = 'ticket 0001'
@@ -198,28 +230,48 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
                     file.write('1')
         else:
             ticket_name = f'{user.name}'
-        channel = await guild.create_text_channel(ticket_name, category=bot.get_channel(config.category_id))
+
+        if 'SEVEN_DAY_THREAD_ARCHIVE' in guild.features:
+            duration = 10080
+        elif 'THREE_DAY_THREAD_ARCHIVE' in guild.features:
+            duration = 4320
+        else:
+            duration = 1440
+
+        thread_embed = embed_creator('New Ticket', '', 'b', user, time=True)
+        thread_embed.add_field(name='User', value=f'{user.mention} ({user.id})')
+        created_thread = await forum_channel.create_thread(
+            name=ticket_name,
+            embed=thread_embed,
+            auto_archive_duration=duration
+        )
+        # Bug fix: unwrap ThreadWithMessage responses so downstream logic always receives a discord.Thread instance.
+        thread = unwrap_created_thread(created_thread)
     except discord.HTTPException as e:
         if 'Contains words not allowed for servers in Server Discovery' in e.text:
-            channel = await guild.create_text_channel('ticket', category=bot.get_channel(config.category_id))
+            created_thread = await forum_channel.create_thread(
+                name='ticket',
+                embed=thread_embed,
+                auto_archive_duration=duration
+            )
+            # Bug fix: ensure Server Discovery fallback also unwraps ThreadWithMessage values.
+            thread = unwrap_created_thread(created_thread)
         else:
             raise e from None
+
+    # Bug fix: fetch the created thread to avoid sending to a stale placeholder that triggers Unknown Channel errors.
+    thread = await ensure_thread_ready(thread)
+
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
-        curs.execute('INSERT INTO tickets VALUES (?, ?)', (user.id, channel.id))
+        curs.execute('INSERT INTO tickets VALUES (?, ?)', (user.id, thread.id))
         conn.commit()
-    await bot.get_channel(config.log_channel_id).send(embed=embed_creator('New Ticket', '', 'g', user))
-    embed = embed_creator('New Ticket', '', 'b', user, time=True)
-    embed.add_field(name='User', value=f'{user.mention} ({user.id})')
-    header = await channel.send(embed=embed)
-    if 'SEVEN_DAY_THREAD_ARCHIVE' in guild.features:
-        duration = 10080
-    elif 'THREE_DAY_THREAD_ARCHIVE' in guild.features:
-        duration = 4320
-    else:
-        duration = 1440
-    await header.create_thread(name=f'Discussion for {user.name}', auto_archive_duration=duration)
-    return channel
+
+    log_channel = require_text_channel(config.log_channel_id, 'log')
+    await log_channel.send(embed=embed_creator('New Ticket', '', 'g', user))
+    # Feature update: keep the forum title in sync with open ticket count for quick moderator awareness.
+    schedule_forum_name_update()
+    return thread
 
 
 def is_helper(ctx):
@@ -230,20 +282,380 @@ def is_mod(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.mod_role_id)
 
 
-def is_modmail_channel(ctx):
-    return isinstance(ctx.channel, discord.TextChannel) and ctx.channel.category.id == config.category_id and ctx.channel.id not in config.channel_ids
+def is_modmail_channel(obj):
+    channel = getattr(obj, 'channel', obj)
+    return isinstance(channel, discord.Thread) and channel.parent_id == config.forum_channel_id
+
+
+# Feature: validate that configured channels expecting plain-text output are still text channels.
+def require_text_channel(channel_id: int, purpose: str) -> discord.TextChannel:
+    """Return the named text channel or raise if it is missing or the wrong type."""
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        guild = bot.get_guild(config.guild_id)
+        if guild is not None:
+            channel = guild.get_channel(channel_id)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    if channel is None:
+        raise RuntimeError(f'The {purpose} channel (ID {channel_id}) could not be found.')
+    raise RuntimeError(f'The {purpose} channel (ID {channel_id}) must be a regular text channel, not {channel.__class__.__name__}.')
 
 
 # Keep the ticket category name updated with the current channel count
-async def update_category_name():
-    category = bot.get_channel(config.category_id)
-    if category:
-        base_name = re.sub(r"\s*\[\d+/50\]$", "", category.name)
-        new_name = f"{base_name} [{len(category.channels)}/50]"
-        if category.name != new_name:
-            await category.edit(name=new_name)
+async def update_forum_name():
+    """Rename the modmail forum to show the number of active ticket threads."""
+    forum_channel = bot.get_channel(config.forum_channel_id)
+    if forum_channel is None:
+        return
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('SELECT COUNT(*) FROM tickets')
+        (open_tickets,) = curs.fetchone()
+
+    base_name = re.sub(r"(?:\s*\[\d+\]|(?:-\d+)+)$", "", forum_channel.name).rstrip('- ')
+    new_name = f"{base_name} [{open_tickets}]"
+    if forum_channel.name != new_name:
+        await forum_channel.edit(name=new_name)
 
 
+def schedule_forum_name_update() -> None:
+    """Run the forum rename task without blocking the caller."""
+
+    async def runner():
+        try:
+            await update_forum_name()
+        except Exception:
+            traceback.print_exc()
+
+    asyncio.create_task(runner())
+
+
+async def resolve_thread(thread_id: int) -> discord.Thread | None:
+    """Return a thread object for the given ID, fetching it if needed."""
+
+    thread = bot.get_channel(thread_id)
+    if isinstance(thread, discord.Thread):
+        return thread
+    guild = bot.get_guild(config.guild_id)
+    if guild is not None:
+        thread = guild.get_thread(thread_id)
+        if isinstance(thread, discord.Thread):
+            return thread
+    try:
+        channel = await bot.fetch_channel(thread_id)
+    except (discord.NotFound, discord.HTTPException):
+        return None
+    return channel if isinstance(channel, discord.Thread) else None
+
+
+async def ensure_thread_ready(thread: discord.Thread) -> discord.Thread:
+    """Fetch and return an up-to-date thread object after creation."""
+
+    resolved_thread = await resolve_thread(thread.id)
+    if resolved_thread is not None:
+        return resolved_thread
+    # Give Discord a moment to register the new thread before retrying.
+    for _ in range(3):
+        await asyncio.sleep(0.25)
+        resolved_thread = await resolve_thread(thread.id)
+        if resolved_thread is not None:
+            return resolved_thread
+    return thread
+
+
+def link_broadcast_thread(aggregator_id: int, user_id: int, thread_id: int) -> None:
+    """Record that a broadcast aggregator thread is associated with a user ticket."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'INSERT OR REPLACE INTO broadcast_links (aggregator_id, user_id, thread_id) VALUES (?, ?, ?)',
+            (aggregator_id, user_id, thread_id)
+        )
+        conn.commit()
+
+
+def get_broadcast_recipients_for_aggregator(aggregator_id: int) -> list[tuple[int, int]]:
+    """Return (user_id, thread_id) tuples for a given aggregator thread."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'SELECT user_id, thread_id FROM broadcast_links WHERE aggregator_id=?',
+            (aggregator_id,)
+        )
+        return curs.fetchall()
+
+
+def get_broadcast_aggregators_for_thread(thread_id: int) -> list[int]:
+    """Return aggregator thread IDs linked to a ticket thread."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute(
+            'SELECT aggregator_id FROM broadcast_links WHERE thread_id=?',
+            (thread_id,)
+        )
+        return [row[0] for row in curs.fetchall()]
+
+
+def unlink_thread_from_broadcasts(thread_id: int) -> None:
+    """Remove any broadcast links that reference a given ticket thread."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM broadcast_links WHERE thread_id=?', (thread_id,))
+        conn.commit()
+
+
+def unlink_aggregator(aggregator_id: int) -> None:
+    """Remove all broadcast links for an aggregator thread."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        curs.execute('DELETE FROM broadcast_links WHERE aggregator_id=?', (aggregator_id,))
+        conn.commit()
+
+
+async def ensure_thread_open(thread: discord.Thread) -> discord.Thread:
+    """Reopen archived threads so broadcasts can resume without errors."""
+
+    if thread.archived:
+        try:
+            await thread.edit(archived=False, locked=False)
+        except discord.HTTPException:
+            pass
+    return thread
+
+
+async def gather_attachment_payloads(attachments: list[discord.Attachment], size_limit: int | None = None) -> list[tuple[str, bytes]]:
+    """Read attachment contents so they can be re-used across multiple destinations."""
+
+    payloads: list[tuple[str, bytes]] = []
+    for attachment in attachments:
+        if size_limit is not None and attachment.size > size_limit:
+            raise ValueError(attachment.filename)
+        payloads.append((attachment.filename, await attachment.read()))
+    return payloads
+
+
+def payloads_to_files(payloads: list[tuple[str, bytes]]) -> list[discord.File]:
+    """Convert stored attachment bytes back into discord.File objects."""
+
+    files: list[discord.File] = []
+    for filename, data in payloads:
+        files.append(discord.File(io.BytesIO(data), filename))
+    return files
+
+
+def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str, bytes]]:
+    """Translate the legacy (BytesIO, filename) tuples into reusable payload data."""
+
+    payloads: list[tuple[str, bytes]] = []
+    for buffer, filename in buffers:
+        buffer.seek(0)
+        payloads.append((filename, buffer.getvalue()))
+    return payloads
+
+
+def build_broadcast_embeds(
+    user: discord.User,
+    guild: discord.Guild,
+    author: discord.abc.User,
+    text: str,
+    anon: bool,
+    *,
+    translated_text: str | None = None,
+    original_text: str | None = None,
+    translation_notice: str | None = None
+) -> tuple[discord.Embed, discord.Embed]:
+    """Create the embeds sent to ticket threads and users during a broadcast."""
+
+    description = translated_text if translated_text is not None else text
+    channel_embed = embed_creator('Message Sent', description, 'r', user, author, anon)
+    user_embed = embed_creator(
+        'Message Received',
+        description,
+        'r',
+        guild,
+        author if not anon else None,
+        False if not anon else True
+    )
+    if original_text:
+        channel_embed.add_field(name='Original', value=original_text[:1024], inline=False)
+        user_embed.add_field(name='Original', value=original_text[:1024], inline=False)
+    if translation_notice:
+        user_embed.set_footer(text=translation_notice, icon_url=user_embed.footer.icon_url)
+    return channel_embed, user_embed
+
+
+async def mirror_mod_reply_to_broadcasts(
+    thread: discord.Thread,
+    user: discord.User,
+    text: str,
+    author: discord.abc.User,
+    anon: bool,
+    attachment_payloads: list[tuple[str, bytes]],
+    *,
+    translated: bool = False,
+    original_text: str | None = None,
+    translation_notice: str | None = None,
+    exclude_aggregator: int | None = None
+) -> None:
+    """Echo moderator replies into any linked broadcast threads for situational awareness."""
+
+    aggregator_ids = set(get_broadcast_aggregators_for_thread(thread.id))
+    if exclude_aggregator is not None:
+        aggregator_ids.discard(exclude_aggregator)
+    if not aggregator_ids:
+        return
+    description = text or '\u200b'
+    for aggregator_id in list(aggregator_ids):
+        aggregator_thread = await resolve_thread(aggregator_id)
+        if aggregator_thread is None:
+            unlink_aggregator(aggregator_id)
+            continue
+        embed = embed_creator('Moderator Reply', description, 'r', user, author, anon=False)
+        embed.add_field(name='Ticket', value=thread.mention, inline=False)
+        embed.set_footer(text=f'User ID: {user.id}')
+        if translated and original_text:
+            embed.add_field(name='Original', value=original_text[:1024], inline=False)
+        if translation_notice:
+            embed.add_field(name='Translation Notice', value=translation_notice[:1024], inline=False)
+        if anon:
+            embed.add_field(name='Sent As', value='Anonymous', inline=False)
+        files = payloads_to_files(attachment_payloads)
+        await aggregator_thread.send(embed=embed, files=files)
+
+
+async def mirror_user_message_to_broadcasts(
+    thread: discord.Thread,
+    user: discord.User,
+    content: str,
+    attachments: list[discord.Attachment]
+) -> None:
+    """Mirror user replies into broadcast aggregator threads so moderators see updates."""
+
+    aggregator_ids = set(get_broadcast_aggregators_for_thread(thread.id))
+    if not aggregator_ids:
+        return
+    payloads = await gather_attachment_payloads(attachments)
+    description = content or '\u200b'
+    for aggregator_id in list(aggregator_ids):
+        aggregator_thread = await resolve_thread(aggregator_id)
+        if aggregator_thread is None:
+            unlink_aggregator(aggregator_id)
+            continue
+        embed = embed_creator('User Reply', description, 'g', user)
+        embed.add_field(name='Ticket', value=thread.mention, inline=False)
+        embed.set_footer(text=f'User ID: {user.id}')
+        files = payloads_to_files(payloads)
+        await aggregator_thread.send(embed=embed, files=files)
+
+
+async def dispatch_broadcast_message(
+    channel: discord.Thread,
+    author: discord.abc.User,
+    guild: discord.Guild,
+    text: str,
+    anon: bool,
+    attachments: list[tuple[str, bytes]],
+    recipients: list[tuple[int, int]],
+    *,
+    original_message: discord.Message | None = None,
+    translated_text: str | None = None,
+    original_text: str | None = None,
+    translation_notice: str | None = None
+) -> None:
+    """Send a broadcast payload to every linked ticket, reporting delivery status in-channel."""
+
+    if not text and not attachments:
+        error_embed = embed_creator('', 'Cannot send an empty broadcast.', 'e')
+        await channel.send(embed=error_embed)
+        if original_message is not None:
+            await original_message.delete()
+        return
+
+    delivered: list[tuple[discord.User, discord.Thread]] = []
+    failed: list[str] = []
+    description = translated_text if translated_text is not None else text
+
+    for user_id, thread_id in recipients:
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        except discord.NotFound:
+            failed.append(f'User `{user_id}` could not be fetched.')
+            continue
+
+        if guild not in getattr(user, 'mutual_guilds', []):
+            failed.append(f'{user.mention} not in guild.')
+            continue
+
+        thread = await resolve_thread(thread_id)
+        if thread is None:
+            failed.append(f'{user.mention} missing ticket.')
+            unlink_thread_from_broadcasts(thread_id)
+            continue
+
+        await ensure_thread_open(thread)
+
+        channel_embed, user_embed = build_broadcast_embeds(
+            user,
+            guild,
+            author,
+            text,
+            anon,
+            translated_text=translated_text,
+            original_text=original_text,
+            translation_notice=translation_notice
+        )
+        user_files = payloads_to_files(attachments)
+        try:
+            user_message = await user.send(embed=user_embed, files=user_files)
+        except discord.Forbidden:
+            failed.append(f'{user.mention} blocked DMs.')
+            continue
+
+        for index, attachment in enumerate(user_message.attachments):
+            channel_embed.add_field(name=f'Attachment {index + 1}', value=attachment.url, inline=False)
+
+        try:
+            channel_files = payloads_to_files(attachments)
+            await thread.send(embed=channel_embed, files=channel_files)
+        except discord.HTTPException:
+            failed.append(f'Failed to post in {thread.mention}.')
+            continue
+
+        await mirror_mod_reply_to_broadcasts(
+            thread,
+            user,
+            description,
+            author,
+            anon,
+            attachments,
+            translated=translated_text is not None,
+            original_text=original_text,
+            translation_notice=translation_notice,
+            exclude_aggregator=channel.id
+        )
+        delivered.append((user, thread))
+
+    if original_message is not None:
+        await original_message.delete()
+
+    summary_embed = embed_creator('Broadcast Message', description or '\u200b', 'r', guild, author, anon=False, time=True)
+    if original_text and translated_text is not None:
+        summary_embed.add_field(name='Original', value=original_text[:1024], inline=False)
+    if delivered:
+        delivered_lines = [f'{user.mention} — {thread.mention}' for user, thread in delivered]
+        summary_embed.add_field(name='Delivered', value='\n'.join(delivered_lines)[:1024], inline=False)
+    if failed:
+        summary_embed.add_field(name='Failed', value='\n'.join(failed)[:1024], inline=False)
+    files = payloads_to_files(attachments)
+    await channel.send(embed=summary_embed, files=files)
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
 
@@ -253,7 +665,7 @@ async def on_ready():
     await bot.wait_until_ready()
     print(f'{bot.user.name} has connected to Discord!')
     # Ensure category name shows the correct channel count on startup
-    await update_category_name()
+    await update_forum_name()
 
 
 async def error_handler(error, message=None):
@@ -278,12 +690,28 @@ async def error_handler(error, message=None):
             pass
         return
 
-    if isinstance(error, discord.HTTPException) and 'Maximum number of channels in category reached' in error.text:
-        await bot.get_channel(config.error_channel_id).send(embed=embed_creator('Inbox Full', f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of channels per category (50) has been reached.',
-                                                                                'e', author=message.author))
+    if isinstance(error, discord.HTTPException) and any(phrase in error.text for phrase in (
+        'Maximum number of channels in category reached',
+        'Maximum number of active threads reached',
+        'Maximum number of active private threads reached'
+    )):
+        await bot.get_channel(config.error_channel_id).send(
+            embed=embed_creator(
+                'Inbox Full',
+                f'<@{message.author.id}> ({message.author.id}) tried to open a ticket but the maximum number of active threads in the forum has been reached.',
+                'e',
+                author=message.author
+            )
+        )
         try:
-            await message.channel.send(embed=embed_creator('Inbox Full', f'Sorry, {bot.user.name} is currently full. Please try again later or DM a mod if your problem is urgent.',
-                                                           'e', bot.get_guild(config.guild_id)))
+            await message.channel.send(
+                embed=embed_creator(
+                    'Inbox Full',
+                    f'Sorry, {bot.user.name} is currently full. Please try again later or DM a mod if your problem is urgent.',
+                    'e',
+                    bot.get_guild(config.guild_id)
+                )
+            )
         except:
             pass
         return
@@ -315,6 +743,29 @@ async def error_handler(error, message=None):
 
 
 async def send_message(message, text, anon):
+    recipients = get_broadcast_recipients_for_aggregator(message.channel.id)
+    if recipients:
+        try:
+            attachments = await gather_attachment_payloads(message.attachments, 8000000)
+        except ValueError as attachment_name:
+            await message.channel.send(
+                embed=embed_creator('Failed to Send', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e')
+            )
+            await message.delete()
+            return
+        guild = message.guild or bot.get_guild(config.guild_id)
+        await dispatch_broadcast_message(
+            message.channel,
+            message.author,
+            guild,
+            text,
+            anon,
+            attachments,
+            recipients,
+            original_message=message
+        )
+        return
+
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
@@ -364,6 +815,14 @@ async def send_message(message, text, anon):
         file[0].seek(0)
         files_to_send.append(discord.File(file[0], file[1]))
     await message.channel.send(embed=channel_embed, files=files_to_send)
+    await mirror_mod_reply_to_broadcasts(
+        message.channel,
+        user,
+        text,
+        message.author,
+        anon,
+        buffers_to_payloads(files)
+    )
 
 # New feature: translate user messages to English for moderators
 # First detect the language using AI, translating only when necessary
@@ -447,6 +906,31 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
     """Send a message translated for the recipient along with the original."""
     translated = await translate_to_language(text, language)
     notice = await get_translation_notice(language)
+    recipients = get_broadcast_recipients_for_aggregator(message.channel.id)
+    if recipients:
+        try:
+            attachments = await gather_attachment_payloads(message.attachments, 8000000)
+        except ValueError as attachment_name:
+            await message.channel.send(
+                embed=embed_creator('Failed to Send', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e')
+            )
+            await message.delete()
+            return
+        guild = message.guild or bot.get_guild(config.guild_id)
+        await dispatch_broadcast_message(
+            message.channel,
+            message.author,
+            guild,
+            translated,
+            anon,
+            attachments,
+            recipients,
+            original_message=message,
+            translated_text=translated,
+            original_text=text,
+            translation_notice=notice
+        )
+        return
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (message.channel.id, ))
@@ -499,6 +983,17 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         file[0].seek(0)
         files_to_send.append(discord.File(file[0], file[1]))
     await message.channel.send(embed=channel_embed, files=files_to_send)
+    await mirror_mod_reply_to_broadcasts(
+        message.channel,
+        user,
+        translated,
+        message.author,
+        anon,
+        buffers_to_payloads(files),
+        translated=True,
+        original_text=text,
+        translation_notice=notice
+    )
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -535,15 +1030,33 @@ async def on_message(message):
         with sqlite3.connect('tickets.db') as conn:
             curs = conn.cursor()
             res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (message.author.id, ))
-            channel_id = res.fetchone()
+            channel_row = res.fetchone()
 
+        channel_id = channel_row[0] if channel_row else None
+        channel = None
+        if channel_id:
+            channel = bot.get_channel(channel_id) or guild.get_thread(channel_id)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except (discord.NotFound, discord.HTTPException):
+                    with sqlite3.connect('tickets.db') as conn:
+                        curs = conn.cursor()
+                        curs.execute('DELETE FROM tickets WHERE channel_id=?', (channel_id,))
+                        conn.commit()
+                    channel = None
+
+        if isinstance(channel, discord.Thread) and channel.archived:
+            with sqlite3.connect('tickets.db') as conn:
+                curs = conn.cursor()
+                curs.execute('DELETE FROM tickets WHERE channel_id=?', (channel.id,))
+                conn.commit()
+            try:
+                await channel.delete()
+            except discord.HTTPException:
+                pass
+            schedule_forum_name_update()
             channel = None
-            if channel_id:
-                channel_id = channel_id[0]
-                channel = bot.get_channel(channel_id)
-                if channel is None:
-                    curs.execute('DELETE FROM tickets WHERE channel_id=?', (channel_id,))
-                    conn.commit()
 
         if channel is None:
             channel = await ticket_creator(message.author, guild)
@@ -581,6 +1094,8 @@ async def on_message(message):
 
         if ticket_create:
             await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
+
+        await mirror_user_message_to_broadcasts(channel, message.author, message.content, message.attachments)
 
     # Message from mod to user.
     else:
@@ -651,17 +1166,23 @@ async def send(ctx, user: discord.User, *, message: str = ''):
     with sqlite3.connect('tickets.db') as conn:
         curs = conn.cursor()
         res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (user.id, ))
-        channel_id = res.fetchone()
+        channel_row = res.fetchone()
 
-        if channel_id:
-            channel_id = channel_id[0]
-            channel = bot.get_channel(channel_id)
-            if channel is None:
-                curs.execute('DELETE FROM tickets WHERE channel_id=?', (channel_id,))
-                conn.commit()
-            else:
-                await ctx.send(embed=embed_creator('', f'A ticket for this user already exists: <#{channel_id}>', 'e'))
-                return
+    channel_id = channel_row[0] if channel_row else None
+    if channel_id:
+        existing_channel = bot.get_channel(channel_id) or ctx.guild.get_thread(channel_id)
+        if existing_channel is None:
+            try:
+                existing_channel = await ctx.guild.fetch_channel(channel_id)
+            except (discord.NotFound, discord.HTTPException):
+                with sqlite3.connect('tickets.db') as conn:
+                    curs = conn.cursor()
+                    curs.execute('DELETE FROM tickets WHERE channel_id=?', (channel_id,))
+                    conn.commit()
+                existing_channel = None
+        if existing_channel is not None:
+            await ctx.send(embed=embed_creator('', f'A ticket for this user already exists: <#{channel_id}>', 'e'))
+            return
 
     if ctx.guild not in user.mutual_guilds:
         await ctx.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
@@ -692,7 +1213,8 @@ async def send(ctx, user: discord.User, *, message: str = ''):
     ticket_channel = await ticket_creator(user, ctx.guild)
     await ticket_channel.send(embed=channel_embed)
 
-    await bot.get_channel(config.log_channel_id).send(embed=embed_creator('Ticket Created', '', 'r', user, ctx.author, anon=False))
+    log_channel = require_text_channel(config.log_channel_id, 'log')
+    await log_channel.send(embed=embed_creator('Ticket Created', '', 'r', user, ctx.author, anon=False))
 
     files_to_send = []
     for file in files:
@@ -701,6 +1223,139 @@ async def send(ctx, user: discord.User, *, message: str = ''):
 
     await ctx.channel.send(embed=embed_creator('New Message Sent', f'Ticket: {ticket_channel.mention}', 'r', time=False))
 
+
+# Feature: broadcast allows moderators to coordinate announcements across multiple tickets via a pinned forum thread.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_mod)
+async def broadcast(ctx, users: commands.Greedy[discord.User], *, message: str = ''):
+    """Create a broadcast coordination thread and deliver a message to several users at once."""
+
+    unique_users: list[discord.User] = []
+    seen_ids: set[int] = set()
+    for user in users:
+        if user.id in seen_ids:
+            continue
+        seen_ids.add(user.id)
+        unique_users.append(user)
+
+    if not unique_users:
+        await ctx.send(embed=embed_creator('', 'Provide at least one user to broadcast to.', 'e'))
+        return
+
+    if not message and not ctx.message.attachments:
+        await ctx.send(embed=embed_creator('', 'Broadcasts must include a message or an attachment.', 'e'))
+        return
+
+    try:
+        attachments = await gather_attachment_payloads(ctx.message.attachments, 8000000)
+    except ValueError as attachment_name:
+        await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
+        return
+
+    forum_channel = bot.get_channel(config.forum_channel_id)
+    if forum_channel is None or not isinstance(forum_channel, discord.ForumChannel):
+        await ctx.send(embed=embed_creator('', 'Configured forum channel is missing or invalid.', 'e'))
+        return
+
+    recipients: list[tuple[int, int]] = []
+    setup_failures: list[str] = []
+    prepared_users: list[discord.User] = []
+
+    for user in unique_users:
+        if user == bot.user:
+            setup_failures.append(f'Cannot broadcast to {bot.user.mention}.')
+            continue
+        if ctx.guild not in user.mutual_guilds:
+            setup_failures.append(f'{user.mention} is not in this guild.')
+            continue
+
+        with sqlite3.connect('tickets.db') as conn:
+            curs = conn.cursor()
+            res = curs.execute('SELECT channel_id FROM tickets WHERE user_id=?', (user.id, ))
+            channel_row = res.fetchone()
+
+        thread: discord.Thread | None = None
+        if channel_row:
+            thread_id = channel_row[0]
+            thread = await resolve_thread(thread_id)
+            if thread is None:
+                with sqlite3.connect('tickets.db') as conn:
+                    curs = conn.cursor()
+                    curs.execute('DELETE FROM tickets WHERE channel_id=?', (thread_id,))
+                    conn.commit()
+                thread = None
+
+        if thread is None:
+            thread = await ticket_creator(user, ctx.guild)
+        else:
+            await ensure_thread_open(thread)
+
+        recipients.append((user.id, thread.id))
+        prepared_users.append(user)
+
+    if not recipients:
+        await ctx.send(embed=embed_creator('', 'No valid recipients were available for the broadcast.', 'e'))
+        return
+
+    if 'SEVEN_DAY_THREAD_ARCHIVE' in ctx.guild.features:
+        duration = 10080
+    elif 'THREE_DAY_THREAD_ARCHIVE' in ctx.guild.features:
+        duration = 4320
+    else:
+        duration = 1440
+
+    timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+    recipients_chunks: list[str] = []
+    current_chunk = ''
+    for user in prepared_users:
+        line = f'{user.mention} ({user.id})\n'
+        if len(current_chunk) + len(line) > 1000:
+            recipients_chunks.append(current_chunk)
+            current_chunk = ''
+        current_chunk += line
+    if current_chunk:
+        recipients_chunks.append(current_chunk)
+
+    summary_embed = embed_creator(
+        'Send to All',
+        'Use this thread to coordinate follow ups. Messages posted here reach every linked ticket.',
+        'b',
+        ctx.guild,
+        ctx.author,
+        anon=False,
+        time=True
+    )
+    for index, chunk in enumerate(recipients_chunks, start=1):
+        name = 'Recipients' if len(recipients_chunks) == 1 else f'Recipients (Part {index})'
+        summary_embed.add_field(name=name, value=chunk, inline=False)
+
+    thread_name = f'Send to All {timestamp}'
+    broadcast_thread = await forum_channel.create_thread(
+        name=thread_name,
+        embed=summary_embed,
+        auto_archive_duration=duration
+    )
+    await broadcast_thread.edit(pinned=True)
+
+    for user_id, thread_id in recipients:
+        link_broadcast_thread(broadcast_thread.id, user_id, thread_id)
+
+    await dispatch_broadcast_message(
+        broadcast_thread,
+        ctx.author,
+        ctx.guild,
+        message,
+        True,
+        attachments,
+        recipients
+    )
+
+    confirmation = embed_creator('Broadcast Created', f'Broadcast thread {broadcast_thread.mention} is live.', 'g', ctx.guild)
+    if setup_failures:
+        failure_text = '\n'.join(setup_failures)
+        confirmation.add_field(name='Not Included', value=failure_text[:1024], inline=False)
+    await ctx.send(embed=confirmation)
 
 @bot.command()
 @commands.check(is_helper)
@@ -719,6 +1374,25 @@ async def close(ctx, *, reason: str = ''):
         curs = conn.cursor()
         res = curs.execute('SELECT user_id FROM tickets WHERE channel_id=?', (ctx.channel.id, ))
         user_id = res.fetchone()
+
+    if not user_id:
+        recipients = get_broadcast_recipients_for_aggregator(ctx.channel.id)
+        if recipients:
+            unlink_aggregator(ctx.channel.id)
+            await ctx.send(
+                embed=embed_creator(
+                    'Broadcast Closed',
+                    'This broadcast coordination thread has been closed. Linked tickets remain open for follow ups.',
+                    'r',
+                    ctx.guild,
+                    ctx.author,
+                    anon=False
+                )
+            )
+            await ctx.channel.delete()
+            return
+        await ctx.send(embed=embed_creator('', 'This thread is not associated with a ticket.', 'e'))
+        return
 
     error_message = ('Database Corrupted', 'This ticket is unlikely to be fixable. Would you still like to close and log it?')
     try:
@@ -747,6 +1421,7 @@ async def close(ctx, *, reason: str = ''):
         curs = conn.cursor()
         curs.execute('DELETE FROM tickets WHERE channel_id=?', (ctx.channel.id, ))
         conn.commit()
+    unlink_thread_from_broadcasts(ctx.channel.id)
 
     await ctx.send(embed=embed_creator('Closing Ticket...', '', 'b'))
 
@@ -754,22 +1429,9 @@ async def close(ctx, *, reason: str = ''):
 
     try:
         channel_messages = [message async for message in ctx.channel.history(limit=1024, oldest_first=True)]
-    except IndexError:
+    except (discord.HTTPException, discord.Forbidden):
         channel_messages = []
-    if len(ctx.channel.threads) >= 0:
-        try:
-            thread_messages = [message async for message in ctx.channel.threads[0].history(limit=1024, oldest_first=True)][1:]
-        except IndexError:
-            thread_messages = []
-    else:
-        archived_threads = await ctx.channel.archived_threads(limit=1)
-        if len(archived_threads == 0):
-            thread_messages = []
-        else:
-            try:
-                thread_messages = [message async for message in archived_threads[0].history(limit=1024, oldest_first=True)][1:]
-            except IndexError:
-                thread_messages = []
+    thread_messages = []
 
     with open(f'{user_id}.txt', 'w') as txt_log:
         for message in channel_messages:
@@ -936,10 +1598,11 @@ async def close(ctx, *, reason: str = ''):
     if summary:
         embed_guild.add_field(name='AI Summary', value=summary[:1024], inline=False)
     embed_guild.add_field(name='User', value=f'<@{user_id}> ({user_id})', inline=False)
-    log = await bot.get_channel(config.log_channel_id).send(embed=embed_guild, files=[discord.File(f'{user_id}.txt',
-                                                                                                   filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.txt'),
-                                                                                      discord.File(f'{user_id}.htm',
-                                                                                                   filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')])
+    log_channel = require_text_channel(config.log_channel_id, 'log')
+    log = await log_channel.send(embed=embed_guild, files=[discord.File(f'{user_id}.txt',
+                                                                       filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.txt'),
+                                                          discord.File(f'{user_id}.htm',
+                                                                       filename=f'{user_id}_{datetime.datetime.now().strftime("%y%m%d_%H%M")}.htm')])
 
     with sqlite3.connect('logs.db') as conn:
         curs = conn.cursor()
@@ -948,6 +1611,7 @@ async def close(ctx, *, reason: str = ''):
         conn.commit()
 
     await ctx.channel.delete()
+    await update_forum_name()
     os.remove(f'{user_id}.txt')
     os.remove(f'{user_id}.htm')
     if user is not None:
@@ -1211,7 +1875,7 @@ async def refresh(ctx):
     """Re-reads the external config file"""
 
     with open('config.json', 'r') as file:
-        config.update(json.load(file))
+        config.update(normalise_config_keys(json.load(file)))
     await ctx.message.add_reaction('\u2705')
 
 
@@ -1259,16 +1923,18 @@ async def eval(ctx, *, body: str):
 
 
 @bot.event
-async def on_guild_channel_create(channel):
-    """Update category name when a new channel is created inside it."""
-    if channel.category_id == config.category_id:
-        await update_category_name()
+async def on_thread_create(thread):
+    """Update the forum title when a new ticket thread is created."""
+    if thread.parent_id == config.forum_channel_id:
+        await update_forum_name()
 
 
 @bot.event
-async def on_guild_channel_delete(channel):
-    """Update category name when a channel inside it is deleted."""
-    if channel.category_id == config.category_id:
-        await update_category_name()
+async def on_thread_delete(thread):
+    """Update the forum title when a ticket thread is removed."""
+    if thread.parent_id == config.forum_channel_id:
+        unlink_thread_from_broadcasts(thread.id)
+        unlink_aggregator(thread.id)
+        await update_forum_name()
 
 bot.run(config.token, log_handler=None)

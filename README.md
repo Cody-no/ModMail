@@ -7,21 +7,22 @@ A fork of [Tobiwan's modmail](https://github.com/TobiWan54/ModMail)
 Credit goes to Tobiwan for making the bot. I'm just modifying it to match some feature that [ModMail by Chamburr ](https://github.com/chamburr/modmail) has.
 
 ## Features
-When a user messages the bot, a new channel is created in a category in your server, representing a ticket. As you would expect from a Modmail bot, 
-all the messages in the ticket are logged when the ticket is closed. You can also blacklist users for misuse, and set pre-defined snippets which can 
+When a user messages the bot, a new thread is created inside your ModMail forum channel, representing a ticket. As you would expect from a Modmail bot,
+all the messages in the ticket are logged when the ticket is closed. You can also blacklist users for misuse, and set pre-defined snippets which can
 be sent with a single command.
 
 However, this bot has a few additional features that make it unique:
 
-- **Discussion threads** are created automatically for each ticket and logged when the ticket is closed.
-This allows mods to discuss freely, without the risk of accidentally sending a rude message to the user! From v.1.1.0 onwards there is also an
-option to send messages only with the commands `!reply` and `!areply` (anonymous).
+- **Forum-based tickets** keep every conversation inside a single thread so moderators can collaborate without juggling extra channels.
+From v.1.1.0 onwards there is also an option to send messages only with the commands `!reply` and `!areply` (anonymous).
 
 - `!search` allows you to retrieve the logs of a user's previous tickets, and to search for specific phrases within them.
 
 - `!send` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
 
-- **The following is features I (Codyno) have added onto the existing bot**: 
+- `!broadcast` creates a pinned "Send to All" coordination thread that delivers a message to several tickets at once and keeps every linked conversation in sync.
+
+- **The following is features I (Codyno) have added onto the existing bot**:
 
 - `!replyt`+`!areplyt` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
 in the case that the translation sounds off and the receiver wants to self verify
@@ -30,7 +31,7 @@ in the case that the translation sounds off and the receiver wants to self verif
 
 - **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
-- **Channel counter** is automatically added to the category where the tickets are made. This allows moderators to know that the category is about fill up or not. 
+- **Forum counter** automatically updates the forum channel name with the number of open tickets so moderators instantly know how busy the inbox is.
 
 Once you have the bot running, the `!help` command will show you a list of all the available commands and their sub-commands.
 
@@ -58,8 +59,10 @@ I would recommend storing your own external backups, especially of `logs.db` bec
 - `token` is your bot account's token from the Discord Developer Portal. This value can be set in a `modmail.env` file.
 - `OPENAI_API_KEY` should also be placed in `modmail.env` if you use the AI features.
 - `guild_id` is your server's ID.
-- `category_id` is the ID of the category that tickets to be created in. You will have to create this yourself.
+- `category_id` keeps the legacy category identifier available for integrations that still expect it. Set it to the category that previously held individual ticket channels (or keep it aligned with your forum's category).
+- `forum_channel_id` is the ID of the forum channel where ticket threads should be created. You will have to create this yourself.
 - `log_channel_id` is the ID of the channel that ticket logs will be sent in.
+This must remain a regular text channel; do not point it at the forum itself.
 You will have to create this yourself.
 - `error_channel_id` is the ID of the channel that you want error messages to be sent in.
 This can be the log channel if you want, just set it to the same as above.
