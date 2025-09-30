@@ -489,7 +489,10 @@ async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.For
     """Attempt to remove the provided forum tag and report success."""
 
     try:
-        await forum_channel.delete_tag(tag)
+        remaining_tags = [existing for existing in forum_channel.available_tags if existing.id != tag.id]
+        if len(remaining_tags) == len(forum_channel.available_tags):
+            return False
+        await forum_channel.edit(available_tags=remaining_tags)
         return True
     except discord.HTTPException:
         return False
