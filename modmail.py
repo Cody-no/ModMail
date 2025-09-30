@@ -19,7 +19,6 @@ import aiohttp  # used for fetching logs in the search command
 import openai
 import httpx
 from dotenv import load_dotenv
-import re
 
 # Load variables from a modmail.env file so tokens and API keys can be configured externally
 load_dotenv('modmail.env')
@@ -281,8 +280,6 @@ async def ticket_creator(user: discord.User, guild: discord.Guild):
 
     log_channel = require_text_channel(config.log_channel_id, 'log')
     await log_channel.send(embed=embed_creator('New Ticket', '', 'g', user))
-    # Feature update: keep the forum title in sync with open ticket count for quick moderator awareness.
-    schedule_forum_name_update()
     return thread
 
 
@@ -326,36 +323,6 @@ def get_error_channel() -> discord.TextChannel | None:
     if isinstance(channel, discord.TextChannel):
         return channel
     return None
-
-
-# Keep the ticket category name updated with the current channel count
-async def update_forum_name():
-    """Rename the modmail forum to show the number of active ticket threads."""
-    forum_channel = bot.get_channel(config.forum_channel_id)
-    if forum_channel is None:
-        return
-
-    with sqlite3.connect('tickets.db') as conn:
-        curs = conn.cursor()
-        curs.execute('SELECT COUNT(*) FROM tickets')
-        (open_tickets,) = curs.fetchone()
-
-    base_name = re.sub(r"(?:\s*\[\d+\]|(?:-\d+)+)$", "", forum_channel.name).rstrip('- ')
-    new_name = f"{base_name} [{open_tickets}]"
-    if forum_channel.name != new_name:
-        await forum_channel.edit(name=new_name)
-
-
-def schedule_forum_name_update() -> None:
-    """Run the forum rename task without blocking the caller."""
-
-    async def runner():
-        try:
-            await update_forum_name()
-        except Exception:
-            traceback.print_exc()
-
-    asyncio.create_task(runner())
 
 
 async def resolve_thread(thread_id: int) -> discord.Thread | None:
@@ -489,7 +456,10 @@ async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.For
     """Attempt to remove the provided forum tag and report success."""
 
     try:
-        await forum_channel.delete_tag(tag)
+        remaining_tags = [existing for existing in forum_channel.available_tags if existing.id != tag.id]
+        if len(remaining_tags) == len(forum_channel.available_tags):
+            return False
+        await forum_channel.edit(available_tags=remaining_tags)
         return True
     except discord.HTTPException:
         return False
@@ -631,8 +601,6 @@ bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
 async def on_ready():
     await bot.wait_until_ready()
     print(f'{bot.user.name} has connected to Discord!')
-    # Ensure category name shows the correct channel count on startup
-    await update_forum_name()
 
 
 
@@ -970,7 +938,6 @@ async def close_ticket_thread(
         conn.commit()
 
     await thread.delete()
-    await update_forum_name()
 
     try:
         os.remove(txt_path)
@@ -1233,7 +1200,6 @@ async def on_message(message):
                 await channel.delete()
             except discord.HTTPException:
                 pass
-            schedule_forum_name_update()
             channel = None
 
         if channel is None:
@@ -2168,18 +2134,10 @@ async def eval(ctx, *, body: str):
 
 
 @bot.event
-async def on_thread_create(thread):
-    """Update the forum title when a new ticket thread is created."""
-    if thread.parent_id == config.forum_channel_id:
-        await update_forum_name()
-
-
-@bot.event
 async def on_thread_delete(thread):
-    """Update the forum title when a ticket thread is removed."""
+    """Remove group tags when a ticket thread is removed."""
     if thread.parent_id == config.forum_channel_id:
         remove_thread_from_groups(thread.id)
-        await update_forum_name()
 
 
 bot.run(config.token, log_handler=None)
