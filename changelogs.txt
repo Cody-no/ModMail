@@ -1,4 +1,5 @@
 
+* Removed the forum ticket counter so the forum name no longer changes as tickets open or close.
 * Fixed group tag cleanup to remain compatible with discord.py versions that do not expose `ForumChannel.delete_tag`.
 * Simplified configuration loading to avoid syntax errors seen on Windows deployments when constructing the `Config` object.
 * Added shared group-reply helper and expanded the command set with `!areplymany`, `!replytmany`, and `!areplytmany` for anonymous and translated follow-ups.
