@@ -711,10 +711,6 @@ async def close_ticket_thread(
     if not isinstance(thread, discord.Thread) or thread.parent_id != config.forum_channel_id:
         return False, 'This channel is not a valid ticket.'
 
-    # Bug fix: reopen archived threads so closemany variants can post the closing
-    # notice and generate transcripts just like the single-ticket close command.
-    thread = await ensure_thread_open(thread)
-
     for text in (reason, user_reason, original_reason):
         if text and len(text) > 1024:
             return False, 'Reason too long: the maximum length for closing reasons is 1024 characters.'
@@ -764,26 +760,7 @@ async def close_ticket_thread(
         conn.commit()
     remove_thread_from_groups(thread.id)
 
-    final_user_reason = user_reason if user_reason is not None else reason
-    display_reason = final_user_reason or reason
-
-    closing_embed = embed_creator(
-        'Closing Ticket...',
-        'Generating the transcript before closing this ticket.',
-        'b'
-    )
-    if final_user_reason:
-        closing_embed.add_field(name='Reason Sent to User', value=final_user_reason, inline=False)
-    if original_reason and original_reason != final_user_reason:
-        closing_embed.add_field(name='Original Reason', value=original_reason, inline=False)
-    elif reason and final_user_reason != reason:
-        closing_embed.add_field(name='Moderator Reason', value=reason, inline=False)
-    elif reason and not final_user_reason:
-        closing_embed.add_field(name='Moderator Reason', value=reason, inline=False)
-    if translation_notice:
-        closing_embed.add_field(name='Translation Notice', value=translation_notice, inline=False)
-
-    await thread.send(embed=closing_embed)
+    await thread.send(embed=embed_creator('Closing Ticket...', '', 'b'))
 
     try:
         channel_messages = [message async for message in thread.history(limit=1024, oldest_first=True)]
@@ -902,6 +879,9 @@ async def close_ticket_thread(
     guild = thread.guild or bot.get_guild(config.guild_id)
     embed_user = embed_creator('Ticket Closed', config.close_message, 'b', guild, time=True)
     embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=log_anon)
+
+    final_user_reason = user_reason if user_reason is not None else reason
+    display_reason = final_user_reason or reason
 
     if final_user_reason:
         embed_user.add_field(name='Reason', value=final_user_reason, inline=False)
