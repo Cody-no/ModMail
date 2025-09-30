@@ -881,11 +881,13 @@ async def close_ticket_thread(
     embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=log_anon)
 
     final_user_reason = user_reason if user_reason is not None else reason
+    display_reason = final_user_reason or reason
+
     if final_user_reason:
         embed_user.add_field(name='Reason', value=final_user_reason, inline=False)
-    if reason:
-        embed_guild.add_field(name='Reason', value=reason, inline=False)
-    if original_reason and original_reason != final_user_reason:
+    if display_reason:
+        embed_guild.add_field(name='Reason', value=display_reason, inline=False)
+    if original_reason and original_reason != display_reason:
         embed_user.add_field(name='Original Reason', value=original_reason, inline=False)
         embed_guild.add_field(name='Original Reason', value=original_reason, inline=False)
     if translation_notice:
