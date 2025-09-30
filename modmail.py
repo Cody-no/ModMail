@@ -892,6 +892,12 @@ async def close_ticket_thread(
         icon_url = embed_user.footer.icon_url if embed_user.footer else None
         embed_user.set_footer(text=translation_notice, icon_url=icon_url)
 
+    if user is not None:
+        try:
+            await user.send(embed=embed_user)
+        except discord.Forbidden:
+            pass
+
     summary = None
     try:
         with open(txt_path, 'r', encoding='utf-8') as summary_file:
@@ -938,12 +944,6 @@ async def close_ticket_thread(
         os.remove(htm_path)
     except OSError:
         pass
-
-    if user is not None:
-        try:
-            await user.send(embed=embed_user)
-        except discord.Forbidden:
-            pass
 
     return True, None
 
