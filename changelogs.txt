@@ -1,3 +1,4 @@
+* Fixed translated ticket closure logs so the reason shows both the translated and original text correctly.
 * Sent ticket closure DMs before transcript generation so users receive the "Ticket Closed" notice without delay.
 * Removed the forum ticket counter so the forum name no longer changes as tickets open or close.
 * Fixed group tag cleanup to remain compatible with discord.py versions that do not expose `ForumChannel.delete_tag`.
