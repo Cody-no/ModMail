@@ -1,4 +1,5 @@
 
+* Removed the forum ticket counter so the forum name no longer changes as tickets open or close.
 * Simplified configuration loading to avoid syntax errors seen on Windows deployments when constructing the `Config` object.
 * Added shared group-reply helper and expanded the command set with `!areplymany`, `!replytmany`, and `!areplytmany` for anonymous and translated follow-ups.
 * Introduced `!aclosemany`, `!clostmany`/`!closetmany`, and `!aclosetmany` so bulk closures can be anonymous or translated while keeping forum tags tidy.
