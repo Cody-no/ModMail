@@ -19,10 +19,15 @@ However, this bot has a few additional features that make it unique:
 
 - `!send` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
 
-- `!sendmany`, the various `!replymany` flavours, and the `!closemany` family let you tag a group of tickets with a temporary label, deliver the same update to each one, and close them together when the follow-up is finished.
-
 - **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
+- `!replyt`+`!areplyt` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
+in the case that the translation sounds off and the receiver wants to self verify
+ 
+- `!closet` close the ticket with a translated version of your message. Same as replyt/areplyt
+
+- `!sendmany`, the various `!replymany` flavours, and the `!closemany` family let you tag a group of tickets with a temporary label, deliver the same update to each one, and close them together when the follow-up is finished.
+  
 ### Group tag bulk commands
 
 Use the group tag commands when you need to contact several members about the same topic. Every command works with the temporary group tag created by `!sendmany` so you can keep their ticket updates together.
@@ -35,11 +40,6 @@ Use the group tag commands when you need to contact several members about the sa
 - `!aclosemany <group name> [reason]` — Closes the tickets while anonymising the moderator in the internal log entry.
 - `!clostmany <group name> <language> [reason]` (alias `!closetmany`) and `!aclosetmany <group name> <language> [reason]` — Close every tagged ticket after translating the reason for users, with the anonymous version keeping moderator details private.
 When you finish working with a group, the closing commands automatically delete the temporary forum tag once every ticket has been removed.
-
-- `!replyt`+`!areplyt` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
-in the case that the translation sounds off and the receiver wants to self verify
- 
-- `!closet` close the ticket with a translated version of your message. Same as replyt/areplyt
 
 Once you have the bot running, the `!help` command will show you a list of all the available commands and their sub-commands.
 
