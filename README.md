@@ -33,10 +33,7 @@ Use the group tag commands when you need to contact several members about the sa
 - `!closemany <group name> [reason]` — Closes all tickets tagged with the group name and removes the temporary tag afterwards. The optional reason is logged just like the standard `!close` command.
 - `!aclosemany <group name> [reason]` — Closes the tickets while anonymising the moderator in the internal log entry.
 - `!clostmany <group name> <language> [reason]` (alias `!closetmany`) and `!aclosetmany <group name> <language> [reason]` — Close every tagged ticket after translating the reason for users, with the anonymous version keeping moderator details private.
-
 When you finish working with a group, the closing commands automatically delete the temporary forum tag once every ticket has been removed.
-
-- **The following is features I (Codyno) have added onto the existing bot**:
 
 - `!replyt`+`!areplyt` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
 in the case that the translation sounds off and the receiver wants to self verify
@@ -105,4 +102,5 @@ The required/working versions of these packages are listed in [requirements.txt]
 [aiohttp](https://github.com/aio-libs/aiohttp) - async HTTP client used for log searches (installed with discord.py)
 
 [openai](https://github.com/openai/openai-python) - used for GPT-4o ticket summaries and message translation
+
 [python-dotenv](https://github.com/theskumar/python-dotenv) - loads environment variables from a `modmail.env` file
