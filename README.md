@@ -17,14 +17,14 @@ However, this bot has a few additional features that make it unique:
 
 - `!search` allows you to retrieve the logs of a user's previous tickets, and to search for specific phrases within them.
 
-- `!send` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
+- `!send <id> <message>` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
 
 - **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
-- `!replyt`+`!areplyt` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
+- `!replyt <language> <message>`+`!areplyt <language> <message>` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
 in the case that the translation sounds off and the receiver wants to self verify
  
-- `!closet` close the ticket with a translated version of your message. Same as replyt/areplyt
+- `!closet <language> <reason>` close the ticket with a translated version of your message. Same as replyt/areplyt
 
 - `!sendmany`, the various `!replymany` flavours, and the `!closemany` family let you tag a group of tickets with a temporary label, deliver the same update to each one, and close them together when the follow-up is finished.
   
