@@ -42,8 +42,6 @@ in the case that the translation sounds off and the receiver wants to self verif
 
 - **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
-- **Forum counter** automatically updates the forum channel name with the number of open tickets so moderators instantly know how busy the inbox is.
-
 Once you have the bot running, the `!help` command will show you a list of all the available commands and their sub-commands.
 
 ## Setup
