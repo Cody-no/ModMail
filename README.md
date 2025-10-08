@@ -13,8 +13,7 @@ be sent with a single command.
 
 However, this bot has a few additional features that make it unique:
 
-- **Forum-based tickets** keep every conversation inside a single thread so moderators can collaborate without juggling extra channels.
-From v.1.1.0 onwards there is also an option to send messages only with the commands `!reply` and `!areply` (anonymous).
+- **Forum-based tickets** keep every conversation inside a single thread so moderators can collaborate without juggling extra channels. There is also an option to send messages only with the commands `!reply` and `!areply` (anonymous).
 
 - `!search` allows you to retrieve the logs of a user's previous tickets, and to search for specific phrases within them.
 
