@@ -21,6 +21,8 @@ However, this bot has a few additional features that make it unique:
 
 - `!sendmany`, the various `!replymany` flavours, and the `!closemany` family let you tag a group of tickets with a temporary label, deliver the same update to each one, and close them together when the follow-up is finished.
 
+- **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
+
 ### Group tag bulk commands
 
 Use the group tag commands when you need to contact several members about the same topic. Every command works with the temporary group tag created by `!sendmany` so you can keep their ticket updates together.
@@ -38,8 +40,6 @@ When you finish working with a group, the closing commands automatically delete 
 in the case that the translation sounds off and the receiver wants to self verify
  
 - `!closet` close the ticket with a translated version of your message. Same as replyt/areplyt
-
-- **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
 Once you have the bot running, the `!help` command will show you a list of all the available commands and their sub-commands.
 
