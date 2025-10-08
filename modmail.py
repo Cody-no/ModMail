@@ -594,7 +594,7 @@ def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str
 
 
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
-                   activity=discord.Game('DM to Contact Mods'), help_command=HelpCommand())
+                   activity=discord.Activity(type=discord.ActivityType.custom, name='DM to Contact Mods'), help_command=HelpCommand())
 
 
 @bot.event
