@@ -47,7 +47,14 @@ class UserInput(discord.ui.View):
 
 # Feature: ask users to categorise new tickets so the correct role is notified immediately.
 class HelpOptionDropdown(discord.ui.Select):
-    def __init__(self, thread_id: int, placeholder: str, options: list[discord.SelectOption]):
+    def __init__(self, thread_id: int, placeholder: str):
+        options: list[discord.SelectOption] = []
+        for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
+            descriptor = option_config.descriptor or 'Choose this option if it fits your request.'
+            description = descriptor[:100]
+            if not description:
+                description = 'Choose this option if it fits your request.'
+            options.append(discord.SelectOption(label=name, description=description, value=name))
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
         self.thread_id = thread_id
 
@@ -119,8 +126,7 @@ class HelpOptionView(discord.ui.View):
         pending_message: discord.Message | None = None,
         guild: discord.Guild | None = None,
         ticket_create: bool = False,
-        expiry_notice: str | None = None,
-        options: list[discord.SelectOption] | None = None
+        expiry_notice: str | None = None
     ):
         # Feature: keep help option dropdowns active for three days to give users time to respond.
         super().__init__(timeout=259200)
@@ -137,9 +143,7 @@ class HelpOptionView(discord.ui.View):
             'The selection expired before we could send your message. Please send it again so we can help.'
         )
         if help_options:
-            select_options = options if options is not None else build_default_help_option_options()
-            if select_options:
-                self.add_item(HelpOptionDropdown(thread_id, placeholder, select_options))
+            self.add_item(HelpOptionDropdown(thread_id, placeholder))
 
     async def handle_selection_completion(self, thread: discord.Thread) -> None:
         """Forward the pending message to the ticket thread once a help option is chosen."""
@@ -183,62 +187,6 @@ class HelpOptionView(discord.ui.View):
             except discord.HTTPException:
                 pass
         self.stop()
-
-
-class HelpPromptEditorModal(discord.ui.Modal):
-    """Modal that lets moderators override translated dropdown copy."""
-
-    def __init__(self, language_key: str, language_label: str, initial: HelpPromptCopy):
-        super().__init__(title=f'Edit help prompt copy ({language_label or language_key})')
-        self.language_key = language_key
-        self.language_label = language_label or language_key
-        self.placeholder_input = discord.ui.TextInput(
-            label='Dropdown placeholder',
-            default=initial.placeholder,
-            required=False,
-            max_length=150
-        )
-        self.title_input = discord.ui.TextInput(
-            label='Prompt title',
-            default=initial.title,
-            required=False,
-            max_length=100
-        )
-        self.body_input = discord.ui.TextInput(
-            label='Prompt body',
-            default=initial.body,
-            style=discord.TextStyle.paragraph,
-            required=False,
-            max_length=400
-        )
-        self.acknowledgement_input = discord.ui.TextInput(
-            label='Acknowledgement message',
-            default=initial.acknowledgement,
-            required=False,
-            max_length=200
-        )
-        self.add_item(self.placeholder_input)
-        self.add_item(self.title_input)
-        self.add_item(self.body_input)
-        self.add_item(self.acknowledgement_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not interaction_is_mod(interaction):
-            await interaction.response.send_message('You do not have permission to update help prompts.', ephemeral=True)
-            return
-
-        updated_copy = HelpPromptCopy(
-            placeholder=self.placeholder_input.value.strip() or HELP_PROMPT_DEFAULTS.placeholder,
-            title=self.title_input.value.strip() or HELP_PROMPT_DEFAULTS.title,
-            body=self.body_input.value.strip() or HELP_PROMPT_DEFAULTS.body,
-            acknowledgement=self.acknowledgement_input.value.strip() or HELP_PROMPT_DEFAULTS.acknowledgement
-        )
-        help_prompt_copy_by_language[self.language_key] = updated_copy
-        save_help_prompt_copy()
-        await interaction.response.send_message(
-            f'Saved help prompt copy for **{self.language_label.title()}**.',
-            ephemeral=True
-        )
 
 
 # Feature: provide a button to translate messages on demand rather than automatically
@@ -354,28 +302,6 @@ except FileNotFoundError:
 HELP_OPTIONS_FILE = 'help_options.json'
 HELP_OPTION_LIMIT = 25
 
-# Feature: persist translated dropdown prompts so staff can review and edit them later.
-HELP_PROMPT_COPY_FILE = 'help_prompt_copy.json'
-
-
-@dataclasses.dataclass
-class HelpPromptCopy:
-    """Store the dropdown prompt text and acknowledgement for localisation."""
-
-    placeholder: str
-    title: str
-    body: str
-    acknowledgement: str
-
-
-DEFAULT_HELP_OPTION_DESCRIPTOR = 'Choose this option if it fits your request.'
-HELP_PROMPT_DEFAULTS = HelpPromptCopy(
-    placeholder='Select the help topic that best matches your request.',
-    title='How can we help?',
-    body='Choose the option that best matches the support you need.',
-    acknowledgement='Thanks! We will be with you shortly.'
-)
-
 
 @dataclasses.dataclass
 class HelpOptionConfig:
@@ -420,135 +346,9 @@ except FileNotFoundError:
         json.dump({}, help_options_file, ensure_ascii=False)
 
 
-def _load_prompt_copy_entry(data: dict) -> HelpPromptCopy:
-    placeholder = str(data.get('placeholder', HELP_PROMPT_DEFAULTS.placeholder)).strip()
-    title = str(data.get('title', HELP_PROMPT_DEFAULTS.title)).strip()
-    body = str(data.get('body', HELP_PROMPT_DEFAULTS.body)).strip()
-    acknowledgement = str(data.get('acknowledgement', HELP_PROMPT_DEFAULTS.acknowledgement)).strip()
-    return HelpPromptCopy(
-        placeholder=placeholder or HELP_PROMPT_DEFAULTS.placeholder,
-        title=title or HELP_PROMPT_DEFAULTS.title,
-        body=body or HELP_PROMPT_DEFAULTS.body,
-        acknowledgement=acknowledgement or HELP_PROMPT_DEFAULTS.acknowledgement
-    )
-
-
-try:
-    with open(HELP_PROMPT_COPY_FILE, 'r', encoding='utf-8') as prompt_file:
-        loaded_prompt_copy = json.load(prompt_file)
-        help_prompt_copy_by_language: dict[str, HelpPromptCopy] = {}
-        if isinstance(loaded_prompt_copy, dict):
-            for language_name, payload in loaded_prompt_copy.items():
-                if isinstance(payload, dict):
-                    help_prompt_copy_by_language[str(language_name).strip().lower()] = _load_prompt_copy_entry(payload)
-except FileNotFoundError:
-    help_prompt_copy_by_language = {}
-    with open(HELP_PROMPT_COPY_FILE, 'w', encoding='utf-8') as prompt_file:
-        json.dump({}, prompt_file, ensure_ascii=False)
-
-
 def save_help_options() -> None:
     with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
         json.dump({name: option.to_json() for name, option in help_options.items()}, help_options_file, ensure_ascii=False)
-
-
-def save_help_prompt_copy() -> None:
-    with open(HELP_PROMPT_COPY_FILE, 'w', encoding='utf-8') as prompt_file:
-        json.dump(
-            {
-                language: {
-                    'placeholder': copy.placeholder,
-                    'title': copy.title,
-                    'body': copy.body,
-                    'acknowledgement': copy.acknowledgement
-                }
-                for language, copy in help_prompt_copy_by_language.items()
-            },
-            prompt_file,
-            ensure_ascii=False
-        )
-
-
-def normalise_language_key(language: str | None) -> str:
-    """Normalise language strings for use as dictionary keys."""
-
-    if language is None:
-        return 'unknown'
-    cleaned = language.strip().lower()
-    if not cleaned:
-        return 'unknown'
-    return cleaned
-
-
-async def ensure_help_prompt_copy(language: str | None) -> HelpPromptCopy:
-    """Return translated prompt copy for the requested language, generating it if missing."""
-
-    language_key = 'english' if language_is_english(language) else normalise_language_key(language)
-    stored = help_prompt_copy_by_language.get(language_key)
-    if stored is not None:
-        return stored
-
-    if language_is_english(language):
-        return HELP_PROMPT_DEFAULTS
-
-    target_language = language or 'English'
-    placeholder = await translate_to_language(HELP_PROMPT_DEFAULTS.placeholder, target_language)
-    title = await translate_to_language(HELP_PROMPT_DEFAULTS.title, target_language)
-    body = await translate_to_language(HELP_PROMPT_DEFAULTS.body, target_language)
-    acknowledgement = await translate_to_language(HELP_PROMPT_DEFAULTS.acknowledgement, target_language)
-    placeholder_value = (placeholder or '').strip() or HELP_PROMPT_DEFAULTS.placeholder
-    title_value = (title or '').strip() or HELP_PROMPT_DEFAULTS.title
-    body_value = (body or '').strip() or HELP_PROMPT_DEFAULTS.body
-    acknowledgement_value = (acknowledgement or '').strip() or HELP_PROMPT_DEFAULTS.acknowledgement
-    translated_copy = HelpPromptCopy(
-        placeholder=placeholder_value,
-        title=title_value,
-        body=body_value,
-        acknowledgement=acknowledgement_value
-    )
-    help_prompt_copy_by_language[language_key] = translated_copy
-    save_help_prompt_copy()
-    return translated_copy
-
-
-def stored_help_prompt_copy(language: str | None) -> HelpPromptCopy:
-    """Return the stored prompt copy without triggering translation calls."""
-
-    language_key = 'english' if language_is_english(language) else normalise_language_key(language)
-    stored = help_prompt_copy_by_language.get(language_key)
-    if stored is not None:
-        return stored
-    return HELP_PROMPT_DEFAULTS
-
-
-def build_default_help_option_options() -> list[discord.SelectOption]:
-    """Build help option choices using the stored configuration in English."""
-
-    options: list[discord.SelectOption] = []
-    for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
-        descriptor = option_config.descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
-        description = descriptor[:100] if descriptor else DEFAULT_HELP_OPTION_DESCRIPTOR
-        if not description:
-            description = DEFAULT_HELP_OPTION_DESCRIPTOR
-        options.append(discord.SelectOption(label=name, description=description, value=name))
-    return options
-
-
-async def build_localised_help_option_options(language: str | None) -> list[discord.SelectOption]:
-    """Return help option choices translated into the detected language."""
-
-    options: list[discord.SelectOption] = []
-    for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
-        translated_label = await localise_text(name, language)
-        descriptor = option_config.descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
-        translated_description = await localise_text(descriptor, language)
-        description = (translated_description or DEFAULT_HELP_OPTION_DESCRIPTOR)[:100]
-        if not description:
-            description = DEFAULT_HELP_OPTION_DESCRIPTOR
-        label = translated_label or name
-        options.append(discord.SelectOption(label=label, description=description, value=name))
-    return options
-
 
 with sqlite3.connect('logs.db') as connection:
     cursor = connection.cursor()
@@ -970,26 +770,6 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
         descriptor_text = f' — {option_config.descriptor}' if option_config.descriptor else ''
         lines.append(f'• **{option_name}**{descriptor_text} → {mention}')
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
-
-
-# Feature: allow moderators to edit stored dropdown prompt translations without editing files directly.
-@help_option_group.command(name='editcopy', description='Edit the dropdown prompt and acknowledgement copy for a language.')
-@app_commands.guild_only()
-@app_commands.describe(language='Language to update, for example English or Spanish.')
-async def helpoption_editcopy(interaction: discord.Interaction, language: str) -> None:
-    if not interaction_is_mod(interaction):
-        await interaction.response.send_message('You do not have permission to update help prompts.', ephemeral=True)
-        return
-
-    cleaned_language = language.strip()
-    if not cleaned_language:
-        await interaction.response.send_message('Language names cannot be empty.', ephemeral=True)
-        return
-
-    language_key = 'english' if language_is_english(cleaned_language) else normalise_language_key(cleaned_language)
-    stored_copy = stored_help_prompt_copy(cleaned_language)
-    modal = HelpPromptEditorModal(language_key, cleaned_language, stored_copy)
-    await interaction.response.send_modal(modal)
 
 
 async def deliver_modmail_payload(
@@ -1813,15 +1593,15 @@ async def on_message(message):
         if ticket_create and help_options:
             sample_text = message.content.strip() or 'Hello'
             detected_language = await detect_language(sample_text)
-            prompt_copy = await ensure_help_prompt_copy(detected_language)
-            placeholder_text = prompt_copy.placeholder
-            prompt_title = prompt_copy.title
-            prompt_body = prompt_copy.body
-            acknowledgement_text = prompt_copy.acknowledgement
+            placeholder_base = 'Select the help topic that best matches your request.'
+            prompt_title_base = 'How can we help?'
+            prompt_body_base = 'Choose the option that best matches the support you need.'
+            acknowledgement_base = 'Thanks! We will be with you shortly.'
             expiry_base = 'The selection expired before we could send your message. Please send it again so we can help.'
-            options = await build_localised_help_option_options(detected_language)
-            if not options:
-                options = build_default_help_option_options()
+            placeholder_text = await localise_text(placeholder_base, detected_language)
+            prompt_title = await localise_text(prompt_title_base, detected_language)
+            prompt_body = await localise_text(prompt_body_base, detected_language)
+            acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
             help_view = HelpOptionView(
                 channel.id,
                 placeholder=placeholder_text,
@@ -1830,8 +1610,7 @@ async def on_message(message):
                 pending_message=message,
                 guild=guild,
                 ticket_create=True,
-                expiry_notice=expiry_base,
-                options=options
+                expiry_notice=expiry_base
             )
             prompt_embed = embed_creator(prompt_title, prompt_body, 'b', guild)
             try:
