@@ -47,29 +47,25 @@ class UserInput(discord.ui.View):
 
 # Feature: ask users to categorise new tickets so the correct role is notified immediately.
 class HelpOptionDropdown(discord.ui.Select):
-    def __init__(self, thread_id: int):
-        guild = bot.get_guild(config.guild_id)
+    def __init__(self, thread_id: int, placeholder: str):
         options: list[discord.SelectOption] = []
-        for name, role_id in list(help_options.items())[:HELP_OPTION_LIMIT]:
-            role_name = None
-            if guild is not None:
-                role = guild.get_role(role_id)
-                if role is not None:
-                    role_name = role.name
-            description = f'Notifies {role_name}' if role_name else 'Sends the ticket to the configured team.'
-            options.append(discord.SelectOption(label=name, description=description[:100], value=name))
-        placeholder = 'Select the help topic that best matches your request'
+        for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
+            descriptor = option_config.descriptor or 'Choose this option if it fits your request.'
+            description = descriptor[:100]
+            if not description:
+                description = 'Choose this option if it fits your request.'
+            options.append(discord.SelectOption(label=name, description=description, value=name))
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
         self.thread_id = thread_id
 
     async def callback(self, interaction: discord.Interaction) -> None:
         selection = self.values[0]
-        role_id = help_options.get(selection)
+        option_config = help_options.get(selection)
+        role_id = option_config.role_id if option_config else None
         thread = await resolve_thread(self.thread_id)
         if thread is None:
             await interaction.response.send_message(
-                'Sorry, the ticket channel could not be located. A moderator will assist you shortly.',
-                ephemeral=True
+                'Sorry, the ticket channel could not be located. A moderator will assist you shortly.'
             )
             return
 
@@ -78,10 +74,11 @@ class HelpOptionDropdown(discord.ui.Select):
             _forum_channel, forum_tag = await ensure_group_tag(selection)
         except Exception as error:
             await interaction.response.send_message(
-                f'Sorry, something went wrong while labelling your ticket: {error}.',
-                ephemeral=True
+                f'Sorry, something went wrong while labelling your ticket: {error}.'
             )
             return
+
+        await interaction.response.defer(thinking=True)
         await apply_group_tag(thread, forum_tag)
 
         guild = interaction.client.get_guild(config.guild_id)
@@ -96,29 +93,80 @@ class HelpOptionDropdown(discord.ui.Select):
             notification = f'{role_mention} {notification}'
         await thread.send(notification)
 
-        if self.view is not None:
-            for child in self.view.children:
-                child.disabled = True
-            await interaction.response.edit_message(
-                content='Thanks! The team has been notified and will be with you shortly.',
-                view=self.view
-            )
-            if isinstance(self.view, HelpOptionView):
-                self.view.stop()
+        acknowledgement_text = 'Thanks! We will be with you shortly.'
+        if isinstance(self.view, HelpOptionView):
+            try:
+                await self.view.handle_selection_completion(thread)
+            except Exception as error:
+                await interaction.followup.send(
+                    f'Something went wrong while sending your message: {error}',
+                )
+                return
+            acknowledgement_text = self.view.acknowledgement_text or acknowledgement_text
+            await self.view.disable(interaction)
         else:
-            await interaction.response.send_message(
-                'Thanks! The team has been notified and will be with you shortly.',
-                ephemeral=True
-            )
+            if self.view is not None:
+                for child in self.view.children:
+                    child.disabled = True
+                try:
+                    await interaction.message.edit(view=self.view)
+                except discord.HTTPException:
+                    pass
+        await interaction.followup.send(acknowledgement_text)
 
 
 class HelpOptionView(discord.ui.View):
-    def __init__(self, thread_id: int):
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        thread_id: int,
+        *,
+        placeholder: str = 'Select the help topic that best matches your request.',
+        acknowledgement: str = 'Thanks! We will be with you shortly.',
+        language: str | None = None,
+        pending_message: discord.Message | None = None,
+        guild: discord.Guild | None = None,
+        ticket_create: bool = False,
+        expiry_notice: str | None = None
+    ):
+        # Feature: keep help option dropdowns active for three days to give users time to respond.
+        super().__init__(timeout=259200)
         self.thread_id = thread_id
         self.message: discord.Message | None = None
+        self.placeholder_text = placeholder
+        self.acknowledgement_text = acknowledgement
+        self.language = language
+        self.pending_message = pending_message
+        self.guild = guild
+        self.ticket_create = ticket_create
+        self.forwarded = False
+        self.expiry_notice = expiry_notice or (
+            'The selection expired before we could send your message. Please send it again so we can help.'
+        )
         if help_options:
-            self.add_item(HelpOptionDropdown(thread_id))
+            self.add_item(HelpOptionDropdown(thread_id, placeholder))
+
+    async def handle_selection_completion(self, thread: discord.Thread) -> None:
+        """Forward the pending message to the ticket thread once a help option is chosen."""
+
+        if self.pending_message is None or self.guild is None or self.forwarded:
+            return
+        await relay_user_message(self.pending_message, thread, self.guild, ticket_create=self.ticket_create)
+        self.forwarded = True
+        self.pending_message = None
+
+    async def disable(self, interaction: discord.Interaction) -> None:
+        """Disable dropdown controls after the user makes a selection."""
+
+        if not self.children:
+            return
+        for child in self.children:
+            child.disabled = True
+        target_message = self.message or interaction.message
+        try:
+            await target_message.edit(view=self)
+        except discord.HTTPException:
+            pass
+        self.stop()
 
     async def on_timeout(self) -> None:
         if not self.children or self.message is None:
@@ -129,6 +177,16 @@ class HelpOptionView(discord.ui.View):
             await self.message.edit(view=self)
         except discord.HTTPException:
             pass
+        if self.pending_message is not None and not self.forwarded:
+            try:
+                timeout_text = await localise_text(self.expiry_notice, self.language)
+            except Exception:
+                timeout_text = self.expiry_notice
+            try:
+                await self.message.channel.send(timeout_text)
+            except discord.HTTPException:
+                pass
+        self.stop()
 
 
 # Feature: provide a button to translate messages on demand rather than automatically
@@ -243,19 +301,54 @@ except FileNotFoundError:
 # Feature: configurable help options let users route new tickets to the right helpers automatically.
 HELP_OPTIONS_FILE = 'help_options.json'
 HELP_OPTION_LIMIT = 25
+
+
+@dataclasses.dataclass
+class HelpOptionConfig:
+    """Persist the role ping and description shown for each help option."""
+
+    role_id: int | None = None
+    descriptor: str | None = None
+
+    def to_json(self) -> dict:
+        payload: dict[str, int | str] = {}
+        if self.role_id is not None:
+            payload['role_id'] = self.role_id
+        if self.descriptor:
+            payload['descriptor'] = self.descriptor
+        return payload
+
+
 try:
     with open(HELP_OPTIONS_FILE, 'r', encoding='utf-8') as help_options_file:
         loaded_help_options = json.load(help_options_file)
-        help_options: dict[str, int] = {str(name): int(role_id) for name, role_id in loaded_help_options.items()}
+        help_options: dict[str, HelpOptionConfig] = {}
+        for name, value in loaded_help_options.items():
+            role_id: int | None = None
+            descriptor: str | None = None
+            if isinstance(value, dict):
+                raw_role = value.get('role_id')
+                if isinstance(raw_role, int):
+                    role_id = raw_role
+                elif isinstance(raw_role, str) and raw_role.isdigit():
+                    role_id = int(raw_role)
+                raw_descriptor = value.get('descriptor')
+                if isinstance(raw_descriptor, str) and raw_descriptor.strip():
+                    descriptor = raw_descriptor.strip()
+            elif isinstance(value, int):
+                role_id = value
+            elif isinstance(value, str) and value.isdigit():
+                role_id = int(value)
+            help_options[str(name)] = HelpOptionConfig(role_id=role_id, descriptor=descriptor)
 except FileNotFoundError:
     help_options = {}
     with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
-        json.dump(help_options, help_options_file, ensure_ascii=False)
+        json.dump({}, help_options_file, ensure_ascii=False)
 
 
 def save_help_options() -> None:
     with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
-        json.dump(help_options, help_options_file, ensure_ascii=False)
+        json.dump({name: option.to_json() for name, option in help_options.items()}, help_options_file, ensure_ascii=False)
 
 with sqlite3.connect('logs.db') as connection:
     cursor = connection.cursor()
@@ -588,8 +681,17 @@ help_option_group = app_commands.Group(name='helpoption', description='Manage ti
 
 @help_option_group.command(name='add', description='Add or update a help option for new tickets.')
 @app_commands.guild_only()
-@app_commands.describe(name='The label shown to users when selecting the help option.', role='The role to ping when selected.')
-async def helpoption_add(interaction: discord.Interaction, name: str, role: discord.Role) -> None:
+@app_commands.describe(
+    name='The label shown to users when selecting the help option.',
+    role='The role to ping when selected. Leave blank to disable pings.',
+    descriptor='Short description shown in the dropdown menu.'
+)
+async def helpoption_add(
+    interaction: discord.Interaction,
+    name: str,
+    role: discord.Role | None = None,
+    descriptor: str | None = None
+) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
         return
@@ -608,12 +710,22 @@ async def helpoption_add(interaction: discord.Interaction, name: str, role: disc
         )
         return
 
-    help_options[cleaned_name] = role.id
+    descriptor_value = descriptor.strip() if descriptor else None
+    if descriptor_value and len(descriptor_value) > 100:
+        await interaction.response.send_message('Help option descriptions must be 100 characters or fewer.', ephemeral=True)
+        return
+
+    role_id = role.id if role is not None else None
+    help_options[cleaned_name] = HelpOptionConfig(role_id=role_id, descriptor=descriptor_value)
     save_help_options()
-    await interaction.response.send_message(
-        f'Help option **{cleaned_name}** will now notify {role.mention}.',
-        ephemeral=True
-    )
+    pieces = [f'Help option **{cleaned_name}** has been saved.']
+    if role is not None:
+        pieces.append(f'It will mention {role.mention}.')
+    else:
+        pieces.append('It will not mention a role automatically.')
+    if descriptor_value:
+        pieces.append(f'Description: {descriptor_value}')
+    await interaction.response.send_message(' '.join(pieces), ephemeral=True)
 
 
 @help_option_group.command(name='remove', description='Remove a help option.')
@@ -647,10 +759,16 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
 
     guild = interaction.guild
     lines = []
-    for option_name, role_id in help_options.items():
-        role = guild.get_role(role_id) if guild is not None else None
-        mention = role.mention if role is not None else f'Role {role_id} (missing)'
-        lines.append(f'• **{option_name}** → {mention}')
+    for option_name, option_config in help_options.items():
+        role = guild.get_role(option_config.role_id) if guild is not None and option_config.role_id else None
+        if option_config.role_id is None:
+            mention = 'No role ping'
+        elif role is not None:
+            mention = role.mention
+        else:
+            mention = f'Role {option_config.role_id} (missing)'
+        descriptor_text = f' — {option_config.descriptor}' if option_config.descriptor else ''
+        lines.append(f'• **{option_name}**{descriptor_text} → {mention}')
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 
 
@@ -694,6 +812,46 @@ async def deliver_modmail_payload(
         return False, 'Failed to post inside the ticket thread.'
 
     return True, None
+
+
+# Feature: relay user messages into their ticket threads after collecting help categories.
+async def relay_user_message(
+    message: discord.Message,
+    thread: discord.Thread,
+    guild: discord.Guild,
+    *,
+    ticket_create: bool
+) -> None:
+    confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
+    ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
+    user_embed = embed_creator('Message Sent', message.content, 'g', guild)
+    view = TranslateView(message.content) if message.content else None
+    files = []
+    total_filesize = 0
+    attachment_embeds = []
+    attachment_count = 0
+    if message.attachments:
+        await confirmation_message.edit(
+            embed=embed_creator('Sending Message...', 'This may take a few minutes.', 'g', guild)
+        )
+        for attachment in message.attachments:
+            attachment_count += 1
+            total_filesize += attachment.size
+            if attachment.size < guild.filesize_limit:
+                files.append(await attachment.to_file())
+                attachment_embeds.append(embed_creator(f'Attachment {attachment_count}', '', 'g', message.author))
+            ticket_embed.add_field(name=f'Attachment {attachment_count}', value=attachment.url, inline=False)
+        user_embed.add_field(name='Attachment(s) Sent Successfully', value=len(message.attachments))
+    if total_filesize < guild.filesize_limit and len(files) <= 10:
+        await thread.send(embed=ticket_embed, files=files, view=view)
+    else:
+        await thread.send(embed=ticket_embed, view=view)
+        for index, file in enumerate(files):
+            await thread.send(embed=attachment_embeds[index], file=file)
+    await confirmation_message.edit(embed=user_embed)
+
+    if ticket_create:
+        await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
 
 
 async def get_or_create_ticket_for_user(user: discord.User, guild: discord.Guild) -> discord.Thread:
@@ -1274,6 +1432,29 @@ async def translate_to_language(text: str, language: str) -> str:
     except Exception:
         return text
 
+
+def language_is_english(language: str | None) -> bool:
+    """Return True when the provided language label represents English."""
+
+    if language is None:
+        return True
+    normalised = language.strip().lower()
+    if not normalised:
+        return True
+    if normalised in {'english', 'en', 'en-us', 'en-gb', 'en-uk', 'en (us)', 'en (uk)', 'unknown'}:
+        return True
+    return normalised.startswith('en')
+
+
+async def localise_text(text: str, language: str | None) -> str:
+    """Translate helper prompts when the detected language is not English."""
+
+    if language_is_english(language):
+        return text
+    target = language or 'English'
+    translated = await translate_to_language(text, target)
+    return translated or text
+
 async def get_translation_notice(language: str) -> str:
     """Return a translated footer notice for translated messages."""
     base = 'This message was translated using AI and may contain mistakes'
@@ -1408,51 +1589,44 @@ async def on_message(message):
         else:
             ticket_create = False
 
-
-        confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
-        ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
-        user_embed = embed_creator('Message Sent', message.content, 'g', guild)
-        # Create a translate button view so mods can translate on demand
-        view = TranslateView(message.content) if message.content else None
-        files = []
-        total_filesize = 0
-        attachment_embeds = []
-        n = 0
-        if message.attachments:
-            await confirmation_message.edit(embed=embed_creator('Sending Message...', 'This may take a few minutes.',
-                                                                'g', guild))
-            for attachment in message.attachments:
-                n += 1
-                total_filesize += attachment.size
-                if attachment.size < guild.filesize_limit:
-                    files.append(await attachment.to_file())
-                    attachment_embeds.append(embed_creator(f'Attachment {n}', '', 'g', message.author))
-                ticket_embed.add_field(name=f'Attachment {n}', value=attachment.url, inline=False)
-            user_embed.add_field(name='Attachment(s) Sent Successfully', value=len(message.attachments))
-        if total_filesize < guild.filesize_limit and len(files) <= 10:
-            await channel.send(embed=ticket_embed, files=files, view=view)
+        # Feature: detect the user's language and collect their help category before relaying the first message.
+        if ticket_create and help_options:
+            sample_text = message.content.strip() or 'Hello'
+            detected_language = await detect_language(sample_text)
+            placeholder_base = 'Select the help topic that best matches your request.'
+            prompt_title_base = 'How can we help?'
+            prompt_body_base = 'Choose the option that best matches the support you need.'
+            acknowledgement_base = 'Thanks! We will be with you shortly.'
+            expiry_base = 'The selection expired before we could send your message. Please send it again so we can help.'
+            placeholder_text = await localise_text(placeholder_base, detected_language)
+            prompt_title = await localise_text(prompt_title_base, detected_language)
+            prompt_body = await localise_text(prompt_body_base, detected_language)
+            acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
+            help_view = HelpOptionView(
+                channel.id,
+                placeholder=placeholder_text,
+                acknowledgement=acknowledgement_text,
+                language=detected_language,
+                pending_message=message,
+                guild=guild,
+                ticket_create=True,
+                expiry_notice=expiry_base
+            )
+            prompt_embed = embed_creator(prompt_title, prompt_body, 'b', guild)
+            try:
+                prompt_message = await message.channel.send(embed=prompt_embed, view=help_view)
+            except discord.HTTPException:
+                fallback_base = 'We were unable to show the help selection this time, but your message was sent.'
+                fallback_notice = await localise_text(fallback_base, detected_language)
+                await message.channel.send(fallback_notice)
+                await relay_user_message(message, channel, guild, ticket_create=True)
+                return
+            else:
+                help_view.message = prompt_message
+                return
         else:
-            await channel.send(embed=ticket_embed, view=view)
-            for i in range(len(files)):
-                await channel.send(embed=attachment_embeds[i], file=files[i])
-        await confirmation_message.edit(embed=user_embed)
-
-
-        if ticket_create:
-            await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
-            if help_options:
-                help_view = HelpOptionView(channel.id)
-                prompt_embed = embed_creator(
-                    'How can we help?',
-                    'Select the option that best matches the support you need.',
-                    'b',
-                    guild
-                )
-                try:
-                    prompt_message = await message.channel.send(embed=prompt_embed, view=help_view)
-                    help_view.message = prompt_message
-                except discord.HTTPException:
-                    pass
+            await relay_user_message(message, channel, guild, ticket_create=ticket_create)
+            return
 
     # Message from mod to user.
     else:
