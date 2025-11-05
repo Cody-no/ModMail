@@ -1,5 +1,6 @@
 import time
 import discord
+from discord import app_commands
 from discord.ext import commands
 import bleach
 import datetime
@@ -42,6 +43,92 @@ class UserInput(discord.ui.View):
     def __init__(self):
         super().__init__()
         self.value = None
+
+
+# Feature: ask users to categorise new tickets so the correct role is notified immediately.
+class HelpOptionDropdown(discord.ui.Select):
+    def __init__(self, thread_id: int):
+        guild = bot.get_guild(config.guild_id)
+        options: list[discord.SelectOption] = []
+        for name, role_id in list(help_options.items())[:HELP_OPTION_LIMIT]:
+            role_name = None
+            if guild is not None:
+                role = guild.get_role(role_id)
+                if role is not None:
+                    role_name = role.name
+            description = f'Notifies {role_name}' if role_name else 'Sends the ticket to the configured team.'
+            options.append(discord.SelectOption(label=name, description=description[:100], value=name))
+        placeholder = 'Select the help topic that best matches your request'
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+        self.thread_id = thread_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selection = self.values[0]
+        role_id = help_options.get(selection)
+        thread = await resolve_thread(self.thread_id)
+        if thread is None:
+            await interaction.response.send_message(
+                'Sorry, the ticket channel could not be located. A moderator will assist you shortly.',
+                ephemeral=True
+            )
+            return
+
+        await ensure_thread_open(thread)
+        try:
+            _forum_channel, forum_tag = await ensure_group_tag(selection)
+        except Exception as error:
+            await interaction.response.send_message(
+                f'Sorry, something went wrong while labelling your ticket: {error}.',
+                ephemeral=True
+            )
+            return
+        await apply_group_tag(thread, forum_tag)
+
+        guild = interaction.client.get_guild(config.guild_id)
+        role_mention = None
+        if guild is not None and role_id is not None:
+            role = guild.get_role(role_id)
+            if role is not None:
+                role_mention = role.mention
+
+        notification = f'A new ticket was categorised as **{selection}**.'
+        if role_mention:
+            notification = f'{role_mention} {notification}'
+        await thread.send(notification)
+
+        if self.view is not None:
+            for child in self.view.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                content='Thanks! The team has been notified and will be with you shortly.',
+                view=self.view
+            )
+            if isinstance(self.view, HelpOptionView):
+                self.view.stop()
+        else:
+            await interaction.response.send_message(
+                'Thanks! The team has been notified and will be with you shortly.',
+                ephemeral=True
+            )
+
+
+class HelpOptionView(discord.ui.View):
+    def __init__(self, thread_id: int):
+        super().__init__(timeout=300)
+        self.thread_id = thread_id
+        self.message: discord.Message | None = None
+        if help_options:
+            self.add_item(HelpOptionDropdown(thread_id))
+
+    async def on_timeout(self) -> None:
+        if not self.children or self.message is None:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(view=self)
+        except discord.HTTPException:
+            pass
 
 
 # Feature: provide a button to translate messages on demand rather than automatically
@@ -152,6 +239,23 @@ except FileNotFoundError:
     blacklist = []
     with open('blacklist.json', 'w', encoding='utf-8') as blacklist_file:
         json.dump(blacklist, blacklist_file, ensure_ascii=False)
+
+# Feature: configurable help options let users route new tickets to the right helpers automatically.
+HELP_OPTIONS_FILE = 'help_options.json'
+HELP_OPTION_LIMIT = 25
+try:
+    with open(HELP_OPTIONS_FILE, 'r', encoding='utf-8') as help_options_file:
+        loaded_help_options = json.load(help_options_file)
+        help_options: dict[str, int] = {str(name): int(role_id) for name, role_id in loaded_help_options.items()}
+except FileNotFoundError:
+    help_options = {}
+    with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
+        json.dump(help_options, help_options_file, ensure_ascii=False)
+
+
+def save_help_options() -> None:
+    with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
+        json.dump(help_options, help_options_file, ensure_ascii=False)
 
 with sqlite3.connect('logs.db') as connection:
     cursor = connection.cursor()
@@ -294,6 +398,20 @@ def is_mod(ctx):
 def is_modmail_channel(obj):
     channel = getattr(obj, 'channel', obj)
     return isinstance(channel, discord.Thread) and channel.parent_id == config.forum_channel_id
+
+
+# Feature: mirror the moderator role hierarchy checks for interactions.
+def interaction_is_mod(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None or interaction.guild.id != config.guild_id:
+        return False
+    mod_role = interaction.guild.get_role(config.mod_role_id)
+    if mod_role is None:
+        return False
+    if isinstance(interaction.user, discord.Member):
+        member = interaction.user
+    else:
+        member = interaction.guild.get_member(interaction.user.id)
+    return member is not None and member.top_role >= mod_role
 
 
 # Feature: validate that configured channels expecting plain-text output are still text channels.
@@ -465,6 +583,77 @@ async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.For
         return False
 
 
+help_option_group = app_commands.Group(name='helpoption', description='Manage ticket help options.')
+
+
+@help_option_group.command(name='add', description='Add or update a help option for new tickets.')
+@app_commands.guild_only()
+@app_commands.describe(name='The label shown to users when selecting the help option.', role='The role to ping when selected.')
+async def helpoption_add(interaction: discord.Interaction, name: str, role: discord.Role) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
+        return
+
+    cleaned_name = name.strip()
+    if not cleaned_name:
+        await interaction.response.send_message('Help option names cannot be empty.', ephemeral=True)
+        return
+    if len(cleaned_name) > 20:
+        await interaction.response.send_message('Help option names must be 20 characters or fewer.', ephemeral=True)
+        return
+    if cleaned_name not in help_options and len(help_options) >= HELP_OPTION_LIMIT:
+        await interaction.response.send_message(
+            f'Only {HELP_OPTION_LIMIT} help options can be configured at a time.',
+            ephemeral=True
+        )
+        return
+
+    help_options[cleaned_name] = role.id
+    save_help_options()
+    await interaction.response.send_message(
+        f'Help option **{cleaned_name}** will now notify {role.mention}.',
+        ephemeral=True
+    )
+
+
+@help_option_group.command(name='remove', description='Remove a help option.')
+@app_commands.guild_only()
+@app_commands.describe(name='The help option to remove.')
+async def helpoption_remove(interaction: discord.Interaction, name: str) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
+        return
+
+    cleaned_name = name.strip()
+    if cleaned_name not in help_options:
+        await interaction.response.send_message(f'No help option named **{cleaned_name}** exists.', ephemeral=True)
+        return
+
+    del help_options[cleaned_name]
+    save_help_options()
+    await interaction.response.send_message(f'Removed the **{cleaned_name}** help option.', ephemeral=True)
+
+
+@help_option_group.command(name='list', description='Show every configured help option.')
+@app_commands.guild_only()
+async def helpoption_list(interaction: discord.Interaction) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to view help options.', ephemeral=True)
+        return
+
+    if not help_options:
+        await interaction.response.send_message('No help options have been configured yet.', ephemeral=True)
+        return
+
+    guild = interaction.guild
+    lines = []
+    for option_name, role_id in help_options.items():
+        role = guild.get_role(role_id) if guild is not None else None
+        mention = role.mention if role is not None else f'Role {role_id} (missing)'
+        lines.append(f'• **{option_name}** → {mention}')
+    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
 async def deliver_modmail_payload(
     user: discord.User,
     thread: discord.Thread,
@@ -596,10 +785,19 @@ def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str
 bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
                    activity=discord.CustomActivity(name='DM to Contact Mods'), help_command=HelpCommand())
 
+bot.tree.add_command(help_option_group, guild=discord.Object(id=config.guild_id))
+
 
 @bot.event
 async def on_ready():
     await bot.wait_until_ready()
+    if not getattr(bot, 'tree_synced', False):
+        try:
+            await bot.tree.sync(guild=discord.Object(id=config.guild_id))
+        except discord.HTTPException as error:
+            print(f'Failed to sync application commands: {error}')
+        else:
+            bot.tree_synced = True
     print(f'{bot.user.name} has connected to Discord!')
 
 
@@ -1242,6 +1440,19 @@ async def on_message(message):
 
         if ticket_create:
             await message.channel.send(embed=embed_creator('Ticket Created', config.open_message, 'b', guild))
+            if help_options:
+                help_view = HelpOptionView(channel.id)
+                prompt_embed = embed_creator(
+                    'How can we help?',
+                    'Select the option that best matches the support you need.',
+                    'b',
+                    guild
+                )
+                try:
+                    prompt_message = await message.channel.send(embed=prompt_embed, view=help_view)
+                    help_view.message = prompt_message
+                except discord.HTTPException:
+                    pass
 
     # Message from mod to user.
     else:
