@@ -452,6 +452,27 @@ async def cache_translation(text: str, language: str | None, translation: str) -
             json.dump(translation_cache, translation_file, ensure_ascii=False, indent=2)
 
 
+# Feature: let moderators clear translations that no longer apply so cache entries stay relevant.
+async def remove_cached_translation(text: str, language: str | None) -> bool:
+    """Delete a cached translation, returning True when a value was removed."""
+
+    if not text:
+        return False
+    language_key = normalise_language_label(language)
+    if not language_key:
+        return False
+    async with translation_cache_lock:
+        stored = translation_cache.get(text)
+        if not stored or language_key not in stored:
+            return False
+        del stored[language_key]
+        if not stored:
+            del translation_cache[text]
+        with open(TRANSLATIONS_FILE, 'w', encoding='utf-8') as translation_file:
+            json.dump(translation_cache, translation_file, ensure_ascii=False, indent=2)
+    return True
+
+
 @dataclasses.dataclass
 class HelpOptionConfig:
     """Persist the role ping and description shown for each help option."""
@@ -921,34 +942,93 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 
 
-# Feature: allow moderators to edit cached translations through a modal interface.
+# Feature: let moderators revise every help prompt translation for a language in one modal.
+@dataclasses.dataclass
+class TranslationSegment:
+    """Identify each static prompt that can be translated for user-facing flows."""
+
+    label: str
+    source_text: str
+    style: discord.TextStyle
+
+
+def build_translation_segments() -> list[TranslationSegment]:
+    """Return the collection of help prompt texts that can be customised per language."""
+
+    return [
+        TranslationSegment(
+            'Dropdown Placeholder',
+            'Select the help topic that best matches your request.',
+            discord.TextStyle.short
+        ),
+        TranslationSegment(
+            'Prompt Title',
+            'How can we help?',
+            discord.TextStyle.short
+        ),
+        TranslationSegment(
+            'Prompt Body',
+            'Choose the option that best matches the support you need.',
+            discord.TextStyle.long
+        ),
+        TranslationSegment(
+            'Acknowledgement Message',
+            'Thanks! We will be with you shortly.',
+            discord.TextStyle.short
+        ),
+        TranslationSegment(
+            'Expiry Notice',
+            'The selection expired before we could send your message. Please send it again so we can help.',
+            discord.TextStyle.long
+        ),
+    ]
+
+
 class TranslationEditModal(discord.ui.Modal):
-    def __init__(self, source_text: str, language: str):
-        super().__init__(title='Edit Translation')
-        self.source_text = source_text
+    def __init__(self, language: str):
+        super().__init__(title=f'Edit {language.title()} Help Prompts')
         self.language = language
-        cached_value = get_cached_translation(source_text, language) or ''
-        self.translation_input = discord.ui.TextInput(
-            label='Translation',
-            style=discord.TextStyle.long,
-            default=cached_value,
-            max_length=4000,
-            required=True
-        )
-        self.add_item(self.translation_input)
+        self.segments = build_translation_segments()
+        self.inputs: list[tuple[TranslationSegment, discord.ui.TextInput]] = []
+        for row_index, segment in enumerate(self.segments):
+            cached_value = get_cached_translation(segment.source_text, language) or ''
+            input_component = discord.ui.TextInput(
+                label=segment.label,
+                style=segment.style,
+                default=cached_value,
+                placeholder=segment.source_text[:100],
+                max_length=4000,
+                required=False,
+                row=row_index
+            )
+            self.inputs.append((segment, input_component))
+            self.add_item(input_component)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        new_value = self.translation_input.value.strip()
-        await cache_translation(self.source_text, self.language, new_value)
-        preview = (self.source_text[:50] + '…') if len(self.source_text) > 50 else self.source_text
-        await interaction.response.send_message(
-            f'Saved the **{self.language}** translation for `{preview}`.',
-            ephemeral=True
-        )
+        saved_segments: list[str] = []
+        cleared_segments: list[str] = []
+        for segment, input_component in self.inputs:
+            new_value = input_component.value.strip()
+            if new_value:
+                await cache_translation(segment.source_text, self.language, new_value)
+                saved_segments.append(segment.label)
+            else:
+                removed = await remove_cached_translation(segment.source_text, self.language)
+                if removed:
+                    cleared_segments.append(segment.label)
+
+        fragments: list[str] = []
+        if saved_segments:
+            fragments.append('Saved translations for ' + ', '.join(f'**{label}**' for label in saved_segments) + '.')
+        if cleared_segments:
+            fragments.append('Cleared translations for ' + ', '.join(f'**{label}**' for label in cleared_segments) + '.')
+        if not fragments:
+            fragments.append('No changes were made to the cached translations.')
+        await interaction.response.send_message(' '.join(fragments), ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         if not interaction.response.is_done():
-            await interaction.response.send_message('Failed to save the translation. Please try again.', ephemeral=True)
+            await interaction.response.send_message('Failed to save the translations. Please try again.', ephemeral=True)
         raise error
 
 
@@ -961,14 +1041,9 @@ async def translation_language_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     """Provide cached language labels for the translation edit command."""
 
-    namespace = getattr(interaction, 'namespace', None)
-    source_text = getattr(namespace, 'source_text', None) if namespace else None
     suggestions: set[str] = set()
-    if isinstance(source_text, str) and source_text in translation_cache:
-        suggestions.update(translation_cache[source_text].keys())
-    if not suggestions:
-        for cached_translations in translation_cache.values():
-            suggestions.update(cached_translations.keys())
+    for cached_translations in translation_cache.values():
+        suggestions.update(cached_translations.keys())
 
     query = current.strip().lower()
     filtered = []
@@ -981,21 +1056,15 @@ async def translation_language_autocomplete(
     return [app_commands.Choice(name=label, value=label) for label in filtered]
 
 
-@translation_group.command(name='edit', description='Open a modal to adjust a cached translation.')
+@translation_group.command(name='edit', description='Open a modal to adjust help prompt translations.')
 @app_commands.guild_only()
 @app_commands.describe(
-    source_text='The original text that was translated.',
     language='The language label of the translation to adjust.'
 )
 @app_commands.autocomplete(language=translation_language_autocomplete)
-async def translation_edit(interaction: discord.Interaction, source_text: str, language: str) -> None:
+async def translation_edit(interaction: discord.Interaction, language: str) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage translations.', ephemeral=True)
-        return
-
-    cleaned_text = source_text.strip()
-    if not cleaned_text:
-        await interaction.response.send_message('Provide the text you want to translate.', ephemeral=True)
         return
 
     cleaned_language = language.strip()
@@ -1003,7 +1072,7 @@ async def translation_edit(interaction: discord.Interaction, source_text: str, l
         await interaction.response.send_message('Provide the language you want to edit.', ephemeral=True)
         return
 
-    modal = TranslationEditModal(cleaned_text, cleaned_language)
+    modal = TranslationEditModal(cleaned_language)
     await interaction.response.send_modal(modal)
 
 
