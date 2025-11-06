@@ -205,23 +205,44 @@ async def build_localised_help_options(language: str | None) -> list[discord.Sel
 
     options: list[discord.SelectOption] = []
     fallback_description = 'Choose this option if it fits your request.'
-    for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
+    configured_options = list(help_options.items())[:HELP_OPTION_LIMIT]
+    if not configured_options:
+        return options
+
+    if language_is_english(language):
+        for name, option_config in configured_options:
+            descriptor = option_config.descriptor or fallback_description
+            descriptor = descriptor.strip() or fallback_description
+            label_text = name[:100] or name
+            description_text = descriptor[:100] or fallback_description[:100]
+            options.append(
+                discord.SelectOption(label=label_text, description=description_text, value=name)
+            )
+        return options
+
+    translation_targets: dict[str, asyncio.Task[str]] = {}
+    for name, option_config in configured_options:
         descriptor = option_config.descriptor or fallback_description
         descriptor = descriptor.strip() or fallback_description
-        label_text = name
-        description_text = descriptor
-        try:
-            translated_label = await localise_text(name, language)
-        except Exception:
-            translated_label = None
-        if translated_label and translated_label.strip():
-            label_text = translated_label.strip()
-        try:
-            translated_description = await localise_text(descriptor, language)
-        except Exception:
-            translated_description = None
-        if translated_description and translated_description.strip():
-            description_text = translated_description.strip()
+        for text in {name, descriptor}:
+            if text and text not in translation_targets:
+                translation_targets[text] = asyncio.create_task(localise_text(text, language))
+
+    translations: dict[str, str] = {}
+    if translation_targets:
+        results = await asyncio.gather(*translation_targets.values(), return_exceptions=True)
+        for (text, task_result) in zip(translation_targets.keys(), results):
+            if isinstance(task_result, Exception):
+                continue
+            cleaned = task_result.strip()
+            if cleaned:
+                translations[text] = cleaned
+
+    for name, option_config in configured_options:
+        descriptor = option_config.descriptor or fallback_description
+        descriptor = descriptor.strip() or fallback_description
+        label_text = translations.get(name, name)
+        description_text = translations.get(descriptor, descriptor)
         label_text = label_text[:100] or name[:100]
         description_text = description_text[:100] or fallback_description[:100]
         options.append(discord.SelectOption(label=label_text, description=description_text, value=name))
@@ -934,12 +955,39 @@ class TranslationEditModal(discord.ui.Modal):
 translation_group = app_commands.Group(name='translation', description='Manage cached translations.')
 
 
+async def translation_language_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    """Provide cached language labels for the translation edit command."""
+
+    namespace = getattr(interaction, 'namespace', None)
+    source_text = getattr(namespace, 'source_text', None) if namespace else None
+    suggestions: set[str] = set()
+    if isinstance(source_text, str) and source_text in translation_cache:
+        suggestions.update(translation_cache[source_text].keys())
+    if not suggestions:
+        for cached_translations in translation_cache.values():
+            suggestions.update(cached_translations.keys())
+
+    query = current.strip().lower()
+    filtered = []
+    for language_label in sorted(suggestions):
+        if query and query not in language_label:
+            continue
+        filtered.append(language_label)
+        if len(filtered) >= 25:
+            break
+    return [app_commands.Choice(name=label, value=label) for label in filtered]
+
+
 @translation_group.command(name='edit', description='Open a modal to adjust a cached translation.')
 @app_commands.guild_only()
 @app_commands.describe(
     source_text='The original text that was translated.',
     language='The language label of the translation to adjust.'
 )
+@app_commands.autocomplete(language=translation_language_autocomplete)
 async def translation_edit(interaction: discord.Interaction, source_text: str, language: str) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage translations.', ephemeral=True)
