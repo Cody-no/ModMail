@@ -1,3 +1,4 @@
+* Reworked `/translation edit` so moderators choose a language and update each help prompt message from a single modal.
 * Guarded translation prompts with explicit markers so user-provided text cannot inject instructions into OpenAI requests.
 * Cached translated phrases in `translations.json` so repeated prompts reuse prior AI results automatically.
 * Localised the automatic ticket open and close messages using the detected ticket language with cache fallbacks.
