@@ -47,14 +47,7 @@ class UserInput(discord.ui.View):
 
 # Feature: ask users to categorise new tickets so the correct role is notified immediately.
 class HelpOptionDropdown(discord.ui.Select):
-    def __init__(self, thread_id: int, placeholder: str):
-        options: list[discord.SelectOption] = []
-        for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
-            descriptor = option_config.descriptor or 'Choose this option if it fits your request.'
-            description = descriptor[:100]
-            if not description:
-                description = 'Choose this option if it fits your request.'
-            options.append(discord.SelectOption(label=name, description=description, value=name))
+    def __init__(self, thread_id: int, placeholder: str, options: list[discord.SelectOption]):
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
         self.thread_id = thread_id
 
@@ -94,6 +87,7 @@ class HelpOptionDropdown(discord.ui.Select):
         await thread.send(notification)
 
         acknowledgement_text = 'Thanks! We will be with you shortly.'
+        acknowledgement_language: str | None = None
         if isinstance(self.view, HelpOptionView):
             try:
                 await self.view.handle_selection_completion(thread)
@@ -103,6 +97,7 @@ class HelpOptionDropdown(discord.ui.Select):
                 )
                 return
             acknowledgement_text = self.view.acknowledgement_text or acknowledgement_text
+            acknowledgement_language = self.view.language
             await self.view.disable(interaction)
         else:
             if self.view is not None:
@@ -112,6 +107,14 @@ class HelpOptionDropdown(discord.ui.Select):
                     await interaction.message.edit(view=self.view)
                 except discord.HTTPException:
                     pass
+        if (
+            acknowledgement_language
+            and acknowledgement_text == 'Thanks! We will be with you shortly.'
+        ):
+            try:
+                acknowledgement_text = await localise_text(acknowledgement_text, acknowledgement_language)
+            except Exception:
+                pass
         await interaction.followup.send(acknowledgement_text)
 
 
@@ -126,7 +129,8 @@ class HelpOptionView(discord.ui.View):
         pending_message: discord.Message | None = None,
         guild: discord.Guild | None = None,
         ticket_create: bool = False,
-        expiry_notice: str | None = None
+        expiry_notice: str | None = None,
+        options: list[discord.SelectOption] | None = None
     ):
         # Feature: keep help option dropdowns active for three days to give users time to respond.
         super().__init__(timeout=259200)
@@ -142,8 +146,8 @@ class HelpOptionView(discord.ui.View):
         self.expiry_notice = expiry_notice or (
             'The selection expired before we could send your message. Please send it again so we can help.'
         )
-        if help_options:
-            self.add_item(HelpOptionDropdown(thread_id, placeholder))
+        if help_options and options:
+            self.add_item(HelpOptionDropdown(thread_id, placeholder, options))
 
     async def handle_selection_completion(self, thread: discord.Thread) -> None:
         """Forward the pending message to the ticket thread once a help option is chosen."""
@@ -187,6 +191,35 @@ class HelpOptionView(discord.ui.View):
             except discord.HTTPException:
                 pass
         self.stop()
+
+
+# Feature: translate dropdown option labels and descriptions for users selecting categories.
+async def build_localised_help_options(language: str | None) -> list[discord.SelectOption]:
+    """Create dropdown options that are localised for the detected language."""
+
+    options: list[discord.SelectOption] = []
+    fallback_description = 'Choose this option if it fits your request.'
+    for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
+        descriptor = option_config.descriptor or fallback_description
+        descriptor = descriptor.strip() or fallback_description
+        label_text = name
+        description_text = descriptor
+        try:
+            translated_label = await localise_text(name, language)
+        except Exception:
+            translated_label = None
+        if translated_label and translated_label.strip():
+            label_text = translated_label.strip()
+        try:
+            translated_description = await localise_text(descriptor, language)
+        except Exception:
+            translated_description = None
+        if translated_description and translated_description.strip():
+            description_text = translated_description.strip()
+        label_text = label_text[:100] or name[:100]
+        description_text = description_text[:100] or fallback_description[:100]
+        options.append(discord.SelectOption(label=label_text, description=description_text, value=name))
+    return options
 
 
 # Feature: provide a button to translate messages on demand rather than automatically
@@ -1602,6 +1635,7 @@ async def on_message(message):
             prompt_title = await localise_text(prompt_title_base, detected_language)
             prompt_body = await localise_text(prompt_body_base, detected_language)
             acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
+            dropdown_options = await build_localised_help_options(detected_language)
             help_view = HelpOptionView(
                 channel.id,
                 placeholder=placeholder_text,
@@ -1610,7 +1644,8 @@ async def on_message(message):
                 pending_message=message,
                 guild=guild,
                 ticket_create=True,
-                expiry_notice=expiry_base
+                expiry_notice=expiry_base,
+                options=dropdown_options
             )
             prompt_embed = embed_creator(prompt_title, prompt_body, 'b', guild)
             try:
