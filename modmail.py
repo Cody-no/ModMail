@@ -241,6 +241,56 @@ class HelpPromptEditorModal(discord.ui.Modal):
         )
 
 
+# Feature: allow moderators to customise translated help option copy via modal editing.
+class HelpOptionCopyEditorModal(discord.ui.Modal):
+    """Modal that lets moderators override translated dropdown option labels and descriptions."""
+
+    def __init__(
+        self,
+        language_key: str,
+        language_label: str,
+        option_name: str,
+        base_descriptor: str,
+        initial: HelpOptionTranslation
+    ):
+        super().__init__(title=f'Edit help option copy ({language_label or language_key} → {option_name})')
+        self.language_key = language_key
+        self.language_label = language_label or language_key
+        self.option_name = option_name
+        self.base_descriptor = base_descriptor
+        self.label_input = discord.ui.TextInput(
+            label='Option label',
+            default=initial.label,
+            required=False,
+            max_length=100
+        )
+        self.description_input = discord.ui.TextInput(
+            label='Option description',
+            default=initial.description,
+            required=False,
+            max_length=100
+        )
+        self.add_item(self.label_input)
+        self.add_item(self.description_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not interaction_is_mod(interaction):
+            await interaction.response.send_message('You do not have permission to update help options.', ephemeral=True)
+            return
+
+        language_store = help_option_copy_by_language.setdefault(self.language_key, {})
+        updated_translation = HelpOptionTranslation(
+            label=self.label_input.value.strip() or self.option_name,
+            description=self.description_input.value.strip() or self.base_descriptor
+        )
+        language_store[normalise_option_name(self.option_name)] = updated_translation
+        save_help_option_copy()
+        await interaction.response.send_message(
+            f'Saved help option copy for **{self.option_name}** in **{self.language_label.title()}**.',
+            ephemeral=True
+        )
+
+
 # Feature: provide a button to translate messages on demand rather than automatically
 class TranslateView(discord.ui.View):
     """View containing a button that translates a message when pressed."""
@@ -357,6 +407,9 @@ HELP_OPTION_LIMIT = 25
 # Feature: persist translated dropdown prompts so staff can review and edit them later.
 HELP_PROMPT_COPY_FILE = 'help_prompt_copy.json'
 
+# Feature: retain translated dropdown option copy so staff can adjust it without regenerating translations.
+HELP_OPTION_COPY_FILE = 'help_option_copy.json'
+
 
 @dataclasses.dataclass
 class HelpPromptCopy:
@@ -366,6 +419,15 @@ class HelpPromptCopy:
     title: str
     body: str
     acknowledgement: str
+
+
+# Feature: persist translated help option labels and descriptions for reuse and editing.
+@dataclasses.dataclass
+class HelpOptionTranslation:
+    """Store translated dropdown option copy so it can be customised later."""
+
+    label: str
+    description: str
 
 
 DEFAULT_HELP_OPTION_DESCRIPTOR = 'Choose this option if it fits your request.'
@@ -447,6 +509,33 @@ except FileNotFoundError:
         json.dump({}, prompt_file, ensure_ascii=False)
 
 
+def _load_option_copy_entry(data: dict) -> HelpOptionTranslation:
+    label = str(data.get('label', '')).strip()
+    description = str(data.get('description', '')).strip()
+    return HelpOptionTranslation(label=label, description=description)
+
+
+try:
+    with open(HELP_OPTION_COPY_FILE, 'r', encoding='utf-8') as option_copy_file:
+        loaded_option_copy = json.load(option_copy_file)
+        help_option_copy_by_language: dict[str, dict[str, HelpOptionTranslation]] = {}
+        if isinstance(loaded_option_copy, dict):
+            for language_name, payload in loaded_option_copy.items():
+                if not isinstance(payload, dict):
+                    continue
+                language_key = str(language_name).strip().lower()
+                option_entries: dict[str, HelpOptionTranslation] = {}
+                for option_name, option_data in payload.items():
+                    if isinstance(option_data, dict):
+                        option_entries[str(option_name)] = _load_option_copy_entry(option_data)
+                if option_entries:
+                    help_option_copy_by_language[language_key] = option_entries
+except FileNotFoundError:
+    help_option_copy_by_language = {}
+    with open(HELP_OPTION_COPY_FILE, 'w', encoding='utf-8') as option_copy_file:
+        json.dump({}, option_copy_file, ensure_ascii=False)
+
+
 def save_help_options() -> None:
     with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
         json.dump({name: option.to_json() for name, option in help_options.items()}, help_options_file, ensure_ascii=False)
@@ -465,6 +554,24 @@ def save_help_prompt_copy() -> None:
                 for language, copy in help_prompt_copy_by_language.items()
             },
             prompt_file,
+            ensure_ascii=False
+        )
+
+
+def save_help_option_copy() -> None:
+    with open(HELP_OPTION_COPY_FILE, 'w', encoding='utf-8') as option_copy_file:
+        json.dump(
+            {
+                language: {
+                    option_name: {
+                        'label': copy.label,
+                        'description': copy.description
+                    }
+                    for option_name, copy in options.items()
+                }
+                for language, options in help_option_copy_by_language.items()
+            },
+            option_copy_file,
             ensure_ascii=False
         )
 
@@ -521,6 +628,41 @@ def stored_help_prompt_copy(language: str | None) -> HelpPromptCopy:
     return HELP_PROMPT_DEFAULTS
 
 
+def normalise_option_name(name: str) -> str:
+    """Keep option keys consistent when storing translated copy."""
+
+    return str(name)
+
+
+async def ensure_help_option_translation(
+    language: str | None,
+    option_name: str,
+    descriptor: str | None
+) -> HelpOptionTranslation:
+    """Return stored option translation for the requested language, generating it when missing."""
+
+    base_descriptor = descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
+    if language_is_english(language):
+        return HelpOptionTranslation(label=option_name, description=base_descriptor)
+
+    language_key = normalise_language_key(language)
+    language_store = help_option_copy_by_language.setdefault(language_key, {})
+    normalised_name = normalise_option_name(option_name)
+    stored = language_store.get(normalised_name)
+    if stored is not None and stored.label.strip():
+        return stored
+
+    target_language = language or 'English'
+    translated_label = await translate_to_language(option_name, target_language)
+    translated_description = await translate_to_language(base_descriptor, target_language)
+    label_value = (translated_label or '').strip() or option_name
+    description_value = (translated_description or '').strip() or base_descriptor
+    translation = HelpOptionTranslation(label=label_value, description=description_value)
+    language_store[normalised_name] = translation
+    save_help_option_copy()
+    return translation
+
+
 def build_default_help_option_options() -> list[discord.SelectOption]:
     """Build help option choices using the stored configuration in English."""
 
@@ -539,13 +681,13 @@ async def build_localised_help_option_options(language: str | None) -> list[disc
 
     options: list[discord.SelectOption] = []
     for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
-        translated_label = await localise_text(name, language)
         descriptor = option_config.descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
-        translated_description = await localise_text(descriptor, language)
-        description = (translated_description or DEFAULT_HELP_OPTION_DESCRIPTOR)[:100]
+        translation = await ensure_help_option_translation(language, name, descriptor)
+        label = translation.label or name
+        description = translation.description or descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
+        description = description[:100] if description else DEFAULT_HELP_OPTION_DESCRIPTOR
         if not description:
             description = DEFAULT_HELP_OPTION_DESCRIPTOR
-        label = translated_label or name
         options.append(discord.SelectOption(label=label, description=description, value=name))
     return options
 
@@ -970,6 +1112,36 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
         descriptor_text = f' — {option_config.descriptor}' if option_config.descriptor else ''
         lines.append(f'• **{option_name}**{descriptor_text} → {mention}')
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
+# Feature: expose a modal so staff can edit stored help option translations per language.
+@help_option_group.command(name='editoptioncopy', description='Edit a translated help option label and description.')
+@app_commands.guild_only()
+@app_commands.describe(
+    name='Help option to update.',
+    language='Language to update, for example English or Spanish.'
+)
+async def helpoption_editoptioncopy(interaction: discord.Interaction, name: str, language: str) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to update help options.', ephemeral=True)
+        return
+
+    cleaned_name = name.strip()
+    if cleaned_name not in help_options:
+        await interaction.response.send_message(f'No help option named **{cleaned_name}** exists.', ephemeral=True)
+        return
+
+    cleaned_language = language.strip()
+    if not cleaned_language:
+        await interaction.response.send_message('Language names cannot be empty.', ephemeral=True)
+        return
+
+    option_config = help_options[cleaned_name]
+    descriptor = option_config.descriptor or DEFAULT_HELP_OPTION_DESCRIPTOR
+    language_key = 'english' if language_is_english(cleaned_language) else normalise_language_key(cleaned_language)
+    initial = await ensure_help_option_translation(cleaned_language, cleaned_name, descriptor)
+    modal = HelpOptionCopyEditorModal(language_key, cleaned_language, cleaned_name, descriptor, initial)
+    await interaction.response.send_modal(modal)
 
 
 # Feature: allow moderators to edit stored dropdown prompt translations without editing files directly.
