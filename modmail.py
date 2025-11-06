@@ -47,7 +47,14 @@ class UserInput(discord.ui.View):
 
 # Feature: ask users to categorise new tickets so the correct role is notified immediately.
 class HelpOptionDropdown(discord.ui.Select):
-    def __init__(self, thread_id: int, placeholder: str, options: list[discord.SelectOption]):
+    def __init__(self, thread_id: int, placeholder: str):
+        options: list[discord.SelectOption] = []
+        for name, option_config in list(help_options.items())[:HELP_OPTION_LIMIT]:
+            descriptor = option_config.descriptor or 'Choose this option if it fits your request.'
+            description = descriptor[:100]
+            if not description:
+                description = 'Choose this option if it fits your request.'
+            options.append(discord.SelectOption(label=name, description=description, value=name))
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
         self.thread_id = thread_id
 
@@ -119,8 +126,7 @@ class HelpOptionView(discord.ui.View):
         pending_message: discord.Message | None = None,
         guild: discord.Guild | None = None,
         ticket_create: bool = False,
-        expiry_notice: str | None = None,
-        options: list[discord.SelectOption] | None = None
+        expiry_notice: str | None = None
     ):
         # Feature: keep help option dropdowns active for three days to give users time to respond.
         super().__init__(timeout=259200)
@@ -137,9 +143,7 @@ class HelpOptionView(discord.ui.View):
             'The selection expired before we could send your message. Please send it again so we can help.'
         )
         if help_options:
-            select_options = options if options is not None else build_default_help_option_options()
-            if select_options:
-                self.add_item(HelpOptionDropdown(thread_id, placeholder, select_options))
+            self.add_item(HelpOptionDropdown(thread_id, placeholder))
 
     async def handle_selection_completion(self, thread: discord.Thread) -> None:
         """Forward the pending message to the ticket thread once a help option is chosen."""
@@ -1985,15 +1989,15 @@ async def on_message(message):
         if ticket_create and help_options:
             sample_text = message.content.strip() or 'Hello'
             detected_language = await detect_language(sample_text)
-            prompt_copy = await ensure_help_prompt_copy(detected_language)
-            placeholder_text = prompt_copy.placeholder
-            prompt_title = prompt_copy.title
-            prompt_body = prompt_copy.body
-            acknowledgement_text = prompt_copy.acknowledgement
+            placeholder_base = 'Select the help topic that best matches your request.'
+            prompt_title_base = 'How can we help?'
+            prompt_body_base = 'Choose the option that best matches the support you need.'
+            acknowledgement_base = 'Thanks! We will be with you shortly.'
             expiry_base = 'The selection expired before we could send your message. Please send it again so we can help.'
-            options = await build_localised_help_option_options(detected_language)
-            if not options:
-                options = build_default_help_option_options()
+            placeholder_text = await localise_text(placeholder_base, detected_language)
+            prompt_title = await localise_text(prompt_title_base, detected_language)
+            prompt_body = await localise_text(prompt_body_base, detected_language)
+            acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
             help_view = HelpOptionView(
                 channel.id,
                 placeholder=placeholder_text,
@@ -2002,8 +2006,7 @@ async def on_message(message):
                 pending_message=message,
                 guild=guild,
                 ticket_create=True,
-                expiry_notice=expiry_base,
-                options=options
+                expiry_notice=expiry_base
             )
             prompt_embed = embed_creator(prompt_title, prompt_body, 'b', guild)
             try:
