@@ -1,4 +1,5 @@
 *.json
+!translations.json
 *.db
 *.sqlite
 prod.py
