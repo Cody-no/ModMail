@@ -1,3 +1,7 @@
+* Guarded translation prompts with explicit markers so user-provided text cannot inject instructions into OpenAI requests.
+* Cached translated phrases in `translations.json` so repeated prompts reuse prior AI results automatically.
+* Localised the automatic ticket open and close messages using the detected ticket language with cache fallbacks.
+* Added a `/translation edit` modal command for moderators to review and adjust saved translations inside Discord.
 * Localised help option dropdown labels and acknowledgement replies so intake flows match each ticket's detected language.
 * Added language-aware ticket intake that prompts users to categorise requests before forwarding their first message, with dropdowns expiring after three days and updated help option metadata (optional roles and descriptors).
 * Restored the "DM to Contact Mods" status by switching to discord.CustomActivity so it appears reliably.
