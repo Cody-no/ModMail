@@ -981,6 +981,17 @@ def build_translation_segments() -> list[TranslationSegment]:
             'The selection expired before we could send your message. Please send it again so we can help.',
             discord.TextStyle.long
         ),
+        # Feature: surface the ticket lifecycle prompts so they can be translated alongside help prompts.
+        TranslationSegment(
+            'Ticket Open Message',
+            config.open_message,
+            discord.TextStyle.long
+        ),
+        TranslationSegment(
+            'Ticket Close Message',
+            config.close_message,
+            discord.TextStyle.long
+        ),
     ]
 
 
