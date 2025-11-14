@@ -55,6 +55,8 @@ class HelpOptionDropdown(discord.ui.Select):
         selection = self.values[0]
         option_config = help_options.get(selection)
         role_id = option_config.role_id if option_config else None
+        tag_name = option_config.tag_name if option_config and option_config.tag_name else selection
+        tag_emoji = build_option_emoji(option_config.emoji) if option_config else None
         thread = await resolve_thread(self.thread_id)
         if thread is None:
             await interaction.response.send_message(
@@ -63,8 +65,9 @@ class HelpOptionDropdown(discord.ui.Select):
             return
 
         await ensure_thread_open(thread)
+        # Feature: help options can now define custom tag names and emoji so longer labels stay supported.
         try:
-            _forum_channel, forum_tag = await ensure_group_tag(selection)
+            _forum_channel, forum_tag = await ensure_group_tag(tag_name, tag_emoji)
         except Exception as error:
             await interaction.response.send_message(
                 f'Sorry, something went wrong while labelling your ticket: {error}.'
@@ -216,7 +219,12 @@ async def build_localised_help_options(language: str | None) -> list[discord.Sel
             label_text = name[:100] or name
             description_text = descriptor[:100] or fallback_description[:100]
             options.append(
-                discord.SelectOption(label=label_text, description=description_text, value=name)
+                discord.SelectOption(
+                    label=label_text,
+                    description=description_text,
+                    value=name,
+                    emoji=build_option_emoji(option_config.emoji)
+                )
             )
         return options
 
@@ -245,7 +253,14 @@ async def build_localised_help_options(language: str | None) -> list[discord.Sel
         description_text = translations.get(descriptor, descriptor)
         label_text = label_text[:100] or name[:100]
         description_text = description_text[:100] or fallback_description[:100]
-        options.append(discord.SelectOption(label=label_text, description=description_text, value=name))
+        options.append(
+            discord.SelectOption(
+                label=label_text,
+                description=description_text,
+                value=name,
+                emoji=build_option_emoji(option_config.emoji)
+            )
+        )
     return options
 
 
@@ -475,10 +490,13 @@ async def remove_cached_translation(text: str, language: str | None) -> bool:
 
 @dataclasses.dataclass
 class HelpOptionConfig:
-    """Persist the role ping and description shown for each help option."""
+    """Persist the role ping, description, and display metadata for help options."""
 
     role_id: int | None = None
     descriptor: str | None = None
+    tag_name: str | None = None
+    emoji: str | None = None
+    forum_channel_id: int | None = None
 
     def to_json(self) -> dict:
         payload: dict[str, int | str] = {}
@@ -486,7 +504,57 @@ class HelpOptionConfig:
             payload['role_id'] = self.role_id
         if self.descriptor:
             payload['descriptor'] = self.descriptor
+        if self.tag_name:
+            payload['tag_name'] = self.tag_name
+        if self.emoji:
+            payload['emoji'] = self.emoji
+        if self.forum_channel_id is not None:
+            payload['forum_channel_id'] = self.forum_channel_id
         return payload
+
+
+def normalise_help_option_emoji(emoji_text: str) -> str:
+    """Validate emoji input and return a serialisable string representation."""
+
+    cleaned = emoji_text.strip()
+    if not cleaned:
+        raise ValueError('Emoji cannot be empty.')
+    try:
+        parsed = discord.PartialEmoji.from_str(cleaned)
+    except Exception as error:
+        raise ValueError('Emoji could not be parsed.') from error
+    if not parsed.name and parsed.id is None:
+        raise ValueError('Emoji must have a valid value.')
+    return str(parsed)
+
+
+def build_option_emoji(emoji_value: str | None) -> discord.PartialEmoji | str | None:
+    """Convert stored emoji text back into a Discord-friendly object."""
+
+    if not emoji_value:
+        return None
+    try:
+        return discord.PartialEmoji.from_str(emoji_value)
+    except Exception:
+        return emoji_value
+
+
+def slugify_forum_name(label: str) -> str:
+    """Convert help option names into valid forum channel slugs."""
+
+    lowered = label.lower()
+    buffer: list[str] = []
+    previous_dash = False
+    for character in lowered:
+        if character.isalnum():
+            buffer.append(character)
+            previous_dash = False
+        else:
+            if not previous_dash:
+                buffer.append('-')
+            previous_dash = True
+    slug = ''.join(buffer).strip('-') or 'help-option'
+    return slug[:100]
 
 
 try:
@@ -496,6 +564,9 @@ try:
         for name, value in loaded_help_options.items():
             role_id: int | None = None
             descriptor: str | None = None
+            tag_name: str | None = None
+            emoji: str | None = None
+            forum_channel_id: int | None = None
             if isinstance(value, dict):
                 raw_role = value.get('role_id')
                 if isinstance(raw_role, int):
@@ -505,11 +576,28 @@ try:
                 raw_descriptor = value.get('descriptor')
                 if isinstance(raw_descriptor, str) and raw_descriptor.strip():
                     descriptor = raw_descriptor.strip()
+                raw_tag_name = value.get('tag_name')
+                if isinstance(raw_tag_name, str) and raw_tag_name.strip():
+                    tag_name = raw_tag_name.strip()
+                raw_emoji = value.get('emoji')
+                if isinstance(raw_emoji, str) and raw_emoji.strip():
+                    emoji = raw_emoji.strip()
+                raw_forum_id = value.get('forum_channel_id')
+                if isinstance(raw_forum_id, int):
+                    forum_channel_id = raw_forum_id
+                elif isinstance(raw_forum_id, str) and raw_forum_id.isdigit():
+                    forum_channel_id = int(raw_forum_id)
             elif isinstance(value, int):
                 role_id = value
             elif isinstance(value, str) and value.isdigit():
                 role_id = int(value)
-            help_options[str(name)] = HelpOptionConfig(role_id=role_id, descriptor=descriptor)
+            help_options[str(name)] = HelpOptionConfig(
+                role_id=role_id,
+                descriptor=descriptor,
+                tag_name=tag_name,
+                emoji=emoji,
+                forum_channel_id=forum_channel_id
+            )
 except FileNotFoundError:
     help_options = {}
     with open(HELP_OPTIONS_FILE, 'w', encoding='utf-8') as help_options_file:
@@ -803,7 +891,10 @@ async def require_forum_channel() -> discord.ForumChannel:
     raise RuntimeError('Configured modmail forum channel is missing or not a forum channel.')
 
 
-async def ensure_group_tag(tag_name: str) -> tuple[discord.ForumChannel, discord.ForumTag]:
+async def ensure_group_tag(
+    tag_name: str,
+    tag_emoji: discord.PartialEmoji | str | None = None
+) -> tuple[discord.ForumChannel, discord.ForumTag]:
     """Fetch or create the forum tag used to coordinate a bulk message group."""
 
     cleaned_name = tag_name.strip()
@@ -819,7 +910,7 @@ async def ensure_group_tag(tag_name: str) -> tuple[discord.ForumChannel, discord
 
     if len(forum_channel.available_tags) >= 20:
         raise RuntimeError('No tag slots available in the modmail forum.')
-    created_tag = await forum_channel.create_tag(name=cleaned_name)
+    created_tag = await forum_channel.create_tag(name=cleaned_name, emoji=tag_emoji)
     return forum_channel, created_tag
 
 
@@ -854,13 +945,19 @@ help_option_group = app_commands.Group(name='helpoption', description='Manage ti
 @app_commands.describe(
     name='The label shown to users when selecting the help option.',
     role='The role to ping when selected. Leave blank to disable pings.',
-    descriptor='Short description shown in the dropdown menu.'
+    descriptor='Short description shown in the dropdown menu.',
+    tag_name='Optional forum tag name (max 20 characters).',
+    emoji='Emoji shown in the dropdown and applied to the forum tag.',
+    create_forum_channel='Create a dedicated forum channel for this help option.'
 )
 async def helpoption_add(
     interaction: discord.Interaction,
     name: str,
     role: discord.Role | None = None,
-    descriptor: str | None = None
+    descriptor: str | None = None,
+    tag_name: str | None = None,
+    emoji: str | None = None,
+    create_forum_channel: bool = False
 ) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
@@ -870,8 +967,8 @@ async def helpoption_add(
     if not cleaned_name:
         await interaction.response.send_message('Help option names cannot be empty.', ephemeral=True)
         return
-    if len(cleaned_name) > 20:
-        await interaction.response.send_message('Help option names must be 20 characters or fewer.', ephemeral=True)
+    if len(cleaned_name) > 100:
+        await interaction.response.send_message('Help option names must be 100 characters or fewer.', ephemeral=True)
         return
     if cleaned_name not in help_options and len(help_options) >= HELP_OPTION_LIMIT:
         await interaction.response.send_message(
@@ -885,8 +982,75 @@ async def helpoption_add(
         await interaction.response.send_message('Help option descriptions must be 100 characters or fewer.', ephemeral=True)
         return
 
+    default_tag_name = cleaned_name[:20].strip() or cleaned_name[:20]
+    tag_value = default_tag_name
+    if tag_name is not None:
+        configured_tag = tag_name.strip()
+        if not configured_tag:
+            await interaction.response.send_message('Tag names cannot be empty when provided.', ephemeral=True)
+            return
+        if len(configured_tag) > 20:
+            await interaction.response.send_message('Tag names must be 20 characters or fewer.', ephemeral=True)
+            return
+        tag_value = configured_tag
+    if not tag_value:
+        await interaction.response.send_message('Unable to derive a valid tag name from the provided label.', ephemeral=True)
+        return
+
+    emoji_value: str | None = None
+    if emoji is not None:
+        try:
+            emoji_value = normalise_help_option_emoji(emoji)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+
+    forum_channel_id: int | None = None
+    forum_notice: str | None = None
+    # Feature: optionally create a dedicated forum channel per help option for category organisation.
+    if create_forum_channel:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Forum channels can only be created inside a server.', ephemeral=True)
+            return
+        category_channel = guild.get_channel(config.category_id)
+        if not isinstance(category_channel, discord.CategoryChannel):
+            await interaction.response.send_message('Configured category_id must reference a category channel.', ephemeral=True)
+            return
+        target_name = slugify_forum_name(cleaned_name)
+        forum_channel: discord.ForumChannel | None = None
+        for channel in category_channel.channels:
+            if isinstance(channel, discord.ForumChannel) and channel.name == target_name:
+                forum_channel = channel
+                break
+        if forum_channel is None:
+            create_forum = getattr(guild, 'create_forum', None)
+            try:
+                if callable(create_forum):
+                    forum_channel = await create_forum(name=target_name, category=category_channel)
+                else:
+                    forum_channel = await guild.create_text_channel(
+                        name=target_name,
+                        category=category_channel,
+                        type=discord.ChannelType.forum
+                    )
+            except discord.HTTPException as error:
+                await interaction.response.send_message(
+                    f'Unable to create the forum channel: {error}',
+                    ephemeral=True
+                )
+                return
+        forum_channel_id = forum_channel.id
+        forum_notice = f'Forum channel {forum_channel.mention} is assigned to this option.'
+
     role_id = role.id if role is not None else None
-    help_options[cleaned_name] = HelpOptionConfig(role_id=role_id, descriptor=descriptor_value)
+    help_options[cleaned_name] = HelpOptionConfig(
+        role_id=role_id,
+        descriptor=descriptor_value,
+        tag_name=tag_value,
+        emoji=emoji_value,
+        forum_channel_id=forum_channel_id
+    )
     save_help_options()
     pieces = [f'Help option **{cleaned_name}** has been saved.']
     if role is not None:
@@ -895,6 +1059,12 @@ async def helpoption_add(
         pieces.append('It will not mention a role automatically.')
     if descriptor_value:
         pieces.append(f'Description: {descriptor_value}')
+    if tag_value:
+        pieces.append(f'Forum tag: `{tag_value}`.')
+    if emoji_value:
+        pieces.append(f'Emoji: {emoji_value}.')
+    if forum_notice:
+        pieces.append(forum_notice)
     await interaction.response.send_message(' '.join(pieces), ephemeral=True)
 
 
@@ -938,7 +1108,19 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
         else:
             mention = f'Role {option_config.role_id} (missing)'
         descriptor_text = f' — {option_config.descriptor}' if option_config.descriptor else ''
-        lines.append(f'• **{option_name}**{descriptor_text} → {mention}')
+        details: list[str] = []
+        if option_config.tag_name:
+            details.append(f'Tag `{option_config.tag_name}`')
+        if option_config.emoji:
+            details.append(f'Emoji {option_config.emoji}')
+        if option_config.forum_channel_id is not None:
+            forum_channel = guild.get_channel(option_config.forum_channel_id) if guild is not None else None
+            if isinstance(forum_channel, discord.ForumChannel):
+                details.append(f'Forum {forum_channel.mention}')
+            else:
+                details.append(f'Forum ID {option_config.forum_channel_id}')
+        detail_text = f" ({'; '.join(details)})" if details else ''
+        lines.append(f'• **{option_name}**{descriptor_text} → {mention}{detail_text}')
     await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 
 

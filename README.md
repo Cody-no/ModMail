@@ -43,6 +43,10 @@ When you finish working with a group, the closing commands automatically delete 
 
 Once you have the bot running, the `!help` command will show you a list of all the available commands and their sub-commands.
 
+### Help option management
+
+Use the `/helpoption add` command to configure the dropdown shown to users when they open a ticket. Help option names can now be up to 100 characters long while keeping their forum tags within Discord's 20-character limit. Supply the optional **Tag Name** parameter if you want to override the automatically generated tag label, and set the **Emoji** field to show that emoji both in the dropdown and on the created forum tag. When you need a dedicated forum per option, toggle **Create Forum Channel** and the bot will create (or reuse) a forum in the configured `category_id`, inheriting the category's permissions automatically.
+
 ## Setup
 
 To use this bot, you will have to create a bot account for it on the [Discord Developer Portal](https://discord.com/developers)
