@@ -1,4 +1,5 @@
 * Added support for \n escape sequences in custom help option open/close messages so multi-line notices can be entered via slash commands.
+* Ensured help options that create their own forums open tickets inside those forums and keep tags/cleanup in sync.
 * Extended `/helpoption add` with custom tag names, emoji, and on-demand forum channel creation that inherits the configured category permissions.
 * Allowed help option labels to stretch to 100 characters, wiring emoji into the dropdown and forum tags so longer names keep their metadata intact.
 * Reworked `/translation edit` so moderators choose a language and update each help prompt message from a single modal.

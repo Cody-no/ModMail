@@ -47,7 +47,7 @@ class UserInput(discord.ui.View):
 
 # Feature: ask users to categorise new tickets so the correct role is notified immediately.
 class HelpOptionDropdown(discord.ui.Select):
-    def __init__(self, thread_id: int, placeholder: str, options: list[discord.SelectOption]):
+    def __init__(self, thread_id: int | None, placeholder: str, options: list[discord.SelectOption]):
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
         self.thread_id = thread_id
 
@@ -60,17 +60,28 @@ class HelpOptionDropdown(discord.ui.Select):
         # Feature: help options can define opening messages and auto-close behavior per selection.
         opening_message_override = option_config.opening_message if option_config else None
         auto_close_message = option_config.auto_close_message if option_config else None
-        thread = await resolve_thread(self.thread_id)
+        thread = await resolve_thread(self.thread_id) if self.thread_id else None
         if thread is None:
-            await interaction.response.send_message(
-                'Sorry, the ticket channel could not be located. A moderator will assist you shortly.'
-            )
-            return
+            guild = self.view.guild if isinstance(self.view, HelpOptionView) else None
+            if guild is None:
+                guild = interaction.client.get_guild(config.guild_id)
+            if guild is None:
+                await interaction.response.send_message(
+                    'Sorry, the ticket server could not be located. A moderator will assist you shortly.'
+                )
+                return
+            forum_channel_id = option_config.forum_channel_id if option_config else None
+            # Feature: create tickets in the forum attached to the chosen help option.
+            thread = await ticket_creator(interaction.user, guild, forum_channel_id=forum_channel_id)
+            self.thread_id = thread.id
+            if isinstance(self.view, HelpOptionView):
+                self.view.thread_id = thread.id
 
         await ensure_thread_open(thread)
         # Feature: help options can now define custom tag names and emoji so longer labels stay supported.
+        forum_channel = thread.parent if isinstance(thread.parent, discord.ForumChannel) else None
         try:
-            _forum_channel, forum_tag = await ensure_group_tag(tag_name, tag_emoji)
+            _forum_channel, forum_tag = await ensure_group_tag(tag_name, tag_emoji, forum_channel=forum_channel)
         except Exception as error:
             await interaction.response.send_message(
                 f'Sorry, something went wrong while labelling your ticket: {error}.'
@@ -135,7 +146,7 @@ class HelpOptionDropdown(discord.ui.Select):
 class HelpOptionView(discord.ui.View):
     def __init__(
         self,
-        thread_id: int,
+        thread_id: int | None,
         *,
         placeholder: str = 'Select the help topic that best matches your request.',
         acknowledgement: str = 'Thanks! We will be with you shortly.',
@@ -996,10 +1007,43 @@ def unwrap_created_thread(created_thread):
     raise RuntimeError('Forum thread creation returned an unexpected object without a thread.')
 
 
-async def ticket_creator(user: discord.User, guild: discord.Guild):
-    forum_channel = bot.get_channel(config.forum_channel_id)
-    if forum_channel is None or not isinstance(forum_channel, discord.ForumChannel):
-        raise RuntimeError('Configured modmail forum channel is missing or is not a forum.')
+async def resolve_forum_channel(
+    guild: discord.Guild,
+    forum_channel_id: int | None = None
+) -> discord.ForumChannel:
+    """Return the configured forum channel, falling back to the default when needed."""
+
+    fallback_id = config.forum_channel_id
+    target_id = forum_channel_id or fallback_id
+    forum_channel = bot.get_channel(target_id)
+    if forum_channel is None:
+        forum_channel = guild.get_channel(target_id)
+    if forum_channel is None:
+        try:
+            forum_channel = await guild.fetch_channel(target_id)
+        except (discord.NotFound, discord.HTTPException):
+            forum_channel = None
+    if isinstance(forum_channel, discord.ForumChannel):
+        return forum_channel
+    if target_id != fallback_id:
+        forum_channel = bot.get_channel(fallback_id) or guild.get_channel(fallback_id)
+        if forum_channel is None:
+            try:
+                forum_channel = await guild.fetch_channel(fallback_id)
+            except (discord.NotFound, discord.HTTPException):
+                forum_channel = None
+        if isinstance(forum_channel, discord.ForumChannel):
+            return forum_channel
+    raise RuntimeError('Configured modmail forum channel is missing or is not a forum.')
+
+
+async def ticket_creator(
+    user: discord.User,
+    guild: discord.Guild,
+    *,
+    forum_channel_id: int | None = None
+) -> discord.Thread:
+    forum_channel = await resolve_forum_channel(guild, forum_channel_id)
 
     try:
         if config.anonymous_tickets:
@@ -1069,9 +1113,17 @@ def is_helper(ctx):
 def is_mod(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.mod_role_id)
 
+def get_modmail_forum_ids() -> set[int]:
+    forum_ids = {config.forum_channel_id}
+    for option_config in help_options.values():
+        if option_config.forum_channel_id is not None:
+            forum_ids.add(option_config.forum_channel_id)
+    return forum_ids
+
+
 def is_modmail_channel(obj):
     channel = getattr(obj, 'channel', obj)
-    return isinstance(channel, discord.Thread) and channel.parent_id == config.forum_channel_id
+    return isinstance(channel, discord.Thread) and channel.parent_id in get_modmail_forum_ids()
 
 
 # Feature: mirror the moderator role hierarchy checks for interactions.
@@ -1216,7 +1268,9 @@ async def require_forum_channel() -> discord.ForumChannel:
 
 async def ensure_group_tag(
     tag_name: str,
-    tag_emoji: discord.PartialEmoji | str | None = None
+    tag_emoji: discord.PartialEmoji | str | None = None,
+    *,
+    forum_channel: discord.ForumChannel | None = None
 ) -> tuple[discord.ForumChannel, discord.ForumTag]:
     """Fetch or create the forum tag used to coordinate a bulk message group."""
 
@@ -1226,7 +1280,8 @@ async def ensure_group_tag(
     if len(cleaned_name) > 20:
         raise ValueError('Group names must be 20 characters or fewer.')
 
-    forum_channel = await require_forum_channel()
+    if forum_channel is None:
+        forum_channel = await require_forum_channel()
     for tag in forum_channel.available_tags:
         if tag.name.lower() == cleaned_name.lower():
             return forum_channel, tag
@@ -1942,7 +1997,7 @@ async def close_ticket_thread(
 ) -> tuple[bool, str | None]:
     """Close a modmail ticket thread, returning success and an optional error message."""
 
-    if not isinstance(thread, discord.Thread) or thread.parent_id != config.forum_channel_id:
+    if not isinstance(thread, discord.Thread) or thread.parent_id not in get_modmail_forum_ids():
         return False, 'This channel is not a valid ticket.'
 
     for text in (reason, user_reason, original_reason):
@@ -2506,8 +2561,11 @@ async def on_message(message):
             channel = None
 
         if channel is None:
-            channel = await ticket_creator(message.author, guild)
-            ticket_create = True
+            if help_options:
+                ticket_create = True
+            else:
+                channel = await ticket_creator(message.author, guild)
+                ticket_create = True
         else:
             ticket_create = False
 
@@ -2525,8 +2583,9 @@ async def on_message(message):
             prompt_body = await localise_text(prompt_body_base, detected_language)
             acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
             dropdown_options = await build_localised_help_options(detected_language)
+            thread_id = channel.id if isinstance(channel, discord.Thread) else None
             help_view = HelpOptionView(
-                channel.id,
+                thread_id,
                 placeholder=placeholder_text,
                 acknowledgement=acknowledgement_text,
                 language=detected_language,
@@ -2543,6 +2602,8 @@ async def on_message(message):
                 fallback_base = 'We were unable to show the help selection this time, but your message was sent.'
                 fallback_notice = await localise_text(fallback_base, detected_language)
                 await message.channel.send(fallback_notice)
+                if channel is None:
+                    channel = await ticket_creator(message.author, guild)
                 await relay_user_message(
                     message,
                     channel,
@@ -2848,14 +2909,9 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
         await ctx.send(embed=embed_creator('', f'Attachment `{attachment_name}` is larger than 8 MB.', 'e'))
         return
 
-    try:
-        _, group_tag = await ensure_group_tag(cleaned_group)
-    except (ValueError, RuntimeError) as exc:
-        await ctx.send(embed=embed_creator('', str(exc), 'e'))
-        return
-
     delivered: list[str] = []
     failures: list[str] = []
+    group_tags: dict[int, discord.ForumTag] = {}
 
     for user_id in unique_ids:
         if user_id == bot.user.id:
@@ -2890,8 +2946,20 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
             failures.append(f'{user.mention}: {error}')
             continue
 
+        forum_channel = thread.parent if isinstance(thread.parent, discord.ForumChannel) else None
+        forum_id = forum_channel.id if isinstance(forum_channel, discord.ForumChannel) else None
+        if forum_id is not None and forum_id not in group_tags:
+            try:
+                _, group_tag = await ensure_group_tag(cleaned_group, forum_channel=forum_channel)
+            except (ValueError, RuntimeError) as exc:
+                await ctx.send(embed=embed_creator('', str(exc), 'e'))
+                return
+            group_tags[forum_id] = group_tag
+
         try:
-            await apply_group_tag(thread, group_tag)
+            tag_to_apply = group_tags.get(forum_id)
+            if tag_to_apply is not None:
+                await apply_group_tag(thread, tag_to_apply)
         except discord.HTTPException:
             failures.append(f'{user.mention}: failed to apply group tag.')
             continue
@@ -2992,17 +3060,7 @@ async def execute_group_close(
         await ctx.send(embed=embed_creator('', 'Reason too long: the maximum length for closing reasons is 1024 characters.', 'e'))
         return
 
-    try:
-        forum_channel = await require_forum_channel()
-    except RuntimeError as exc:
-        await ctx.send(embed=embed_creator('', str(exc), 'e'))
-        return
-
-    tag = None
-    for candidate in forum_channel.available_tags:
-        if candidate.name.lower() == cleaned_group.lower():
-            tag = candidate
-            break
+    forums_to_cleanup: dict[int, discord.ForumChannel] = {}
 
     user_reason_override: str | None = None
     original_reason: str | None = None
@@ -3028,6 +3086,9 @@ async def execute_group_close(
             failures.append(f'Ticket thread `{thread_id}` no longer exists.')
             continue
 
+        if isinstance(thread.parent, discord.ForumChannel):
+            forums_to_cleanup[thread.parent_id] = thread.parent
+
         success, error = await close_ticket_thread(
             thread,
             ctx.author,
@@ -3046,24 +3107,19 @@ async def execute_group_close(
 
     remove_group(cleaned_group)
 
-    if tag is not None:
+    if forums_to_cleanup:
         await asyncio.sleep(1)
-        try:
-            refreshed_forum = await require_forum_channel()
-        except RuntimeError:
-            refreshed_forum = None
-        if refreshed_forum is not None:
+        for forum_channel in forums_to_cleanup.values():
             refreshed_tag = None
-            for candidate in refreshed_forum.available_tags:
+            for candidate in forum_channel.available_tags:
                 if candidate.name.lower() == cleaned_group.lower():
                     refreshed_tag = candidate
                     break
-            if refreshed_tag is not None:
-                deleted = await delete_group_tag(refreshed_forum, refreshed_tag)
-                if not deleted:
-                    failures.append(f'Failed to delete tag `{cleaned_group}`; please remove it manually.')
-        else:
-            failures.append(f'Unable to confirm deletion for tag `{cleaned_group}`.')
+            if refreshed_tag is None:
+                continue
+            deleted = await delete_group_tag(forum_channel, refreshed_tag)
+            if not deleted:
+                failures.append(f'Failed to delete tag `{cleaned_group}` in {forum_channel.mention}; please remove it manually.')
 
     summary = embed_creator(
         summary_title,
@@ -3459,7 +3515,7 @@ async def eval(ctx, *, body: str):
 @bot.event
 async def on_thread_delete(thread):
     """Remove group tags when a ticket thread is removed."""
-    if thread.parent_id == config.forum_channel_id:
+    if thread.parent_id in get_modmail_forum_ids():
         remove_thread_from_groups(thread.id)
 
 
