@@ -62,3 +62,5 @@
 * Corrected config key in templates/config.json to `anonymous_tickets` and updated README accordingly.
 
 * Added slash commands to manage help options, prompting users to categorise new tickets and pinging the matching support roles automatically.
+* Added a dropdown-driven configuration wizard to update config.json settings from Discord.
+* Routed ticket open/close message updates in the config wizard through modals for cleaner editing.

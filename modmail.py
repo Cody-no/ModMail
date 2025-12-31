@@ -216,6 +216,288 @@ class HelpOptionView(discord.ui.View):
                 await self.message.channel.send(timeout_text)
             except discord.HTTPException:
                 pass
+
+
+# Feature: interactive config wizard uses dropdowns to set config.json values without manual file edits.
+class ConfigSetupView(discord.ui.View):
+    def __init__(self, author_id: int, guild: discord.Guild):
+        super().__init__(timeout=900)
+        self.author_id = author_id
+        self.guild = guild
+        self.message: discord.Message | None = None
+        self.draft = {
+            'guild_id': guild.id,
+            'category_id': config.category_id,
+            'forum_channel_id': config.forum_channel_id,
+            'log_channel_id': config.log_channel_id,
+            'error_channel_id': config.error_channel_id,
+            'helper_role_id': config.helper_role_id,
+            'mod_role_id': config.mod_role_id,
+            'bot_owner_id': config.bot_owner_id,
+            'prefix': config.prefix,
+            'open_message': config.open_message,
+            'close_message': config.close_message,
+            'anonymous_tickets': config.anonymous_tickets,
+            'send_with_command_only': getattr(config, 'send_with_command_only', False)
+        }
+        self.add_item(ConfigGuildSelect(guild))
+        self.add_item(ConfigChannelSelect(
+            'category_id',
+            'Select the ticket category (legacy)',
+            [discord.ChannelType.category]
+        ))
+        self.add_item(ConfigChannelSelect(
+            'forum_channel_id',
+            'Select the modmail forum channel',
+            [discord.ChannelType.forum]
+        ))
+        self.add_item(ConfigChannelSelect(
+            'log_channel_id',
+            'Select the log channel',
+            [discord.ChannelType.text]
+        ))
+        self.add_item(ConfigChannelSelect(
+            'error_channel_id',
+            'Select the error channel',
+            [discord.ChannelType.text]
+        ))
+        self.add_item(ConfigRoleSelect('helper_role_id', 'Select the helper role'))
+        self.add_item(ConfigRoleSelect('mod_role_id', 'Select the moderator role'))
+        self.add_item(ConfigUserSelect('bot_owner_id', 'Select the bot owner'))
+        self.add_item(ConfigBooleanSelect('anonymous_tickets', 'Anonymous ticket names?'))
+        self.add_item(ConfigBooleanSelect('send_with_command_only', 'Send with commands only?'))
+        self.add_item(ConfigTextSelect('prefix', 'Bot prefix'))
+        # Feature: force ticket message updates through modals to capture longer text cleanly.
+        self.add_item(ConfigTextButton('open_message', 'Update ticket open message'))
+        self.add_item(ConfigTextButton('close_message', 'Update ticket close message'))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message('Only the setup owner can use this wizard.', ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def build_embed(self) -> discord.Embed:
+        def describe_channel(channel_id: int, label: str) -> str:
+            channel = self.guild.get_channel(channel_id)
+            if channel is None:
+                return f'{label}: `{channel_id}` (missing)'
+            return f'{label}: {channel.mention}'
+
+        def describe_role(role_id: int, label: str) -> str:
+            role = self.guild.get_role(role_id)
+            if role is None:
+                return f'{label}: `{role_id}` (missing)'
+            return f'{label}: {role.mention}'
+
+        def describe_user(user_id: int, label: str) -> str:
+            member = self.guild.get_member(user_id)
+            if member is None:
+                return f'{label}: `{user_id}` (missing)'
+            return f'{label}: {member.mention}'
+
+        def describe_text(value: str, label: str, limit: int = 140) -> str:
+            trimmed = value.strip() if value else ''
+            if len(trimmed) > limit:
+                trimmed = f'{trimmed[:limit - 3]}...'
+            if not trimmed:
+                trimmed = '(empty)'
+            escaped = trimmed.replace('`', "'")
+            return f'{label}: `{escaped}`'
+
+        lines = [
+            f'Guild: **{self.guild.name}** (`{self.draft["guild_id"]}`)',
+            describe_channel(self.draft['category_id'], 'Category'),
+            describe_channel(self.draft['forum_channel_id'], 'Forum'),
+            describe_channel(self.draft['log_channel_id'], 'Log channel'),
+            describe_channel(self.draft['error_channel_id'], 'Error channel'),
+            describe_role(self.draft['helper_role_id'], 'Helper role'),
+            describe_role(self.draft['mod_role_id'], 'Mod role'),
+            describe_user(self.draft['bot_owner_id'], 'Bot owner'),
+            describe_text(self.draft['prefix'], 'Prefix', limit=20),
+            describe_text(self.draft['open_message'], 'Open message'),
+            describe_text(self.draft['close_message'], 'Close message'),
+            f'Anonymous tickets: **{"Enabled" if self.draft["anonymous_tickets"] else "Disabled"}**',
+            f'Send with command only: **{"Enabled" if self.draft["send_with_command_only"] else "Disabled"}**'
+        ]
+        embed = embed_creator('Config Setup Wizard', '\n'.join(lines), 'b')
+        embed.set_footer(text='Use the dropdowns below to update each setting.')
+        return embed
+
+    async def update_message(self, interaction: discord.Interaction | None = None) -> None:
+        embed = self.build_embed()
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+        if self.message is not None:
+            await self.message.edit(embed=embed, view=self)
+
+    async def persist_config(self) -> None:
+        with open('config.json', 'r', encoding='utf-8') as config_file:
+            config_data = json.load(config_file)
+        config_data.update(self.draft)
+        with open('config.json', 'w', encoding='utf-8') as config_file:
+            json.dump(config_data, config_file, ensure_ascii=False, indent=2)
+        config.update(normalise_config_keys(config_data))
+        config.token = os.getenv('DISCORD_TOKEN', config.token)
+
+    @discord.ui.button(label='Save', style=discord.ButtonStyle.green)
+    async def save(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        try:
+            await self.persist_config()
+        except Exception as error:
+            await interaction.response.send_message(f'Failed to save config: {error}', ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            embed=embed_creator('Config Saved', 'Configuration has been updated.', 'g'),
+            view=self
+        )
+
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            embed=embed_creator('Config Setup Cancelled', 'No changes were saved.', 'r'),
+            view=self
+        )
+
+
+class ConfigGuildSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild):
+        options = [discord.SelectOption(label=guild.name, value=str(guild.id))]
+        super().__init__(placeholder='Confirm the target guild', options=options, min_values=1, max_values=1)
+        self.guild_id = guild.id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        self.view.draft['guild_id'] = self.guild_id
+        await self.view.update_message(interaction)
+
+
+class ConfigChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, field_name: str, placeholder: str, channel_types: list[discord.ChannelType]):
+        super().__init__(placeholder=placeholder, channel_types=channel_types, min_values=1, max_values=1)
+        self.field_name = field_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        channel = self.values[0]
+        self.view.draft[self.field_name] = channel.id
+        await self.view.update_message(interaction)
+
+
+class ConfigRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, field_name: str, placeholder: str):
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1)
+        self.field_name = field_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        role = self.values[0]
+        self.view.draft[self.field_name] = role.id
+        await self.view.update_message(interaction)
+
+
+class ConfigUserSelect(discord.ui.UserSelect):
+    def __init__(self, field_name: str, placeholder: str):
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1)
+        self.field_name = field_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        user = self.values[0]
+        self.view.draft[self.field_name] = user.id
+        await self.view.update_message(interaction)
+
+
+class ConfigBooleanSelect(discord.ui.Select):
+    def __init__(self, field_name: str, placeholder: str):
+        options = [
+            discord.SelectOption(label='Enabled', value='true'),
+            discord.SelectOption(label='Disabled', value='false')
+        ]
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+        self.field_name = field_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        self.view.draft[self.field_name] = self.values[0] == 'true'
+        await self.view.update_message(interaction)
+
+
+class ConfigTextModal(discord.ui.Modal):
+    def __init__(self, view: ConfigSetupView, field_name: str, label: str, current_value: str):
+        super().__init__(title=f'Update {label}')
+        self.view_ref = view
+        self.field_name = field_name
+        self.value_input = discord.ui.TextInput(
+            label=label,
+            default=current_value,
+            max_length=1800
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        self.view_ref.draft[self.field_name] = str(self.value_input.value)
+        await interaction.response.send_message(f'{self.field_name} updated.', ephemeral=True)
+        try:
+            await self.view_ref.update_message()
+        except discord.HTTPException:
+            pass
+
+
+class ConfigTextSelect(discord.ui.Select):
+    def __init__(self, field_name: str, label: str):
+        options = [
+            discord.SelectOption(label='Keep current value', value='keep'),
+            discord.SelectOption(label='Set a new value', value='set')
+        ]
+        super().__init__(placeholder=label, options=options, min_values=1, max_values=1)
+        self.field_name = field_name
+        self.label = label
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        if self.values[0] == 'set':
+            current_value = str(self.view.draft.get(self.field_name, ''))
+            await interaction.response.send_modal(
+                ConfigTextModal(self.view, self.field_name, self.label, current_value)
+            )
+            return
+        await self.view.update_message(interaction)
+
+
+class ConfigTextButton(discord.ui.Button):
+    def __init__(self, field_name: str, label: str):
+        super().__init__(label=label, style=discord.ButtonStyle.blurple)
+        self.field_name = field_name
+        self.label = label
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not isinstance(self.view, ConfigSetupView):
+            return
+        current_value = str(self.view.draft.get(self.field_name, ''))
+        await interaction.response.send_modal(
+            ConfigTextModal(self.view, self.field_name, self.label, current_value)
+        )
         self.stop()
 
 
@@ -1180,7 +1462,22 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
             details.append('Auto-close message set')
         detail_text = f" ({'; '.join(details)})" if details else ''
         lines.append(f'• **{option_name}**{descriptor_text} → {mention}{detail_text}')
-    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+        await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
+# Feature: provide a dropdown-driven wizard to update config settings in Discord.
+@app_commands.command(name='configwizard', description='Open the configuration setup wizard.')
+@app_commands.guild_only()
+async def configwizard(interaction: discord.Interaction) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to update configuration.', ephemeral=True)
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message('This command can only be used in a server.', ephemeral=True)
+        return
+    view = ConfigSetupView(interaction.user.id, interaction.guild)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+    view.message = await interaction.original_response()
 
 
 # Feature: let moderators revise every help prompt translation for a language in one modal.
@@ -1512,6 +1809,7 @@ bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
 
 bot.tree.add_command(help_option_group, guild=discord.Object(id=config.guild_id))
 bot.tree.add_command(translation_group, guild=discord.Object(id=config.guild_id))
+bot.tree.add_command(configwizard, guild=discord.Object(id=config.guild_id))
 
 
 @bot.event
