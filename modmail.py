@@ -1029,8 +1029,10 @@ async def helpoption_add(
         await interaction.response.send_message('Auto-close messages must be 1024 characters or fewer.', ephemeral=True)
         return
 
+    existing_config = help_options.get(cleaned_name)
+
     default_tag_name = cleaned_name[:20].strip() or cleaned_name[:20]
-    tag_value = default_tag_name
+    tag_value = existing_config.tag_name if existing_config and existing_config.tag_name else default_tag_name
     if tag_name is not None:
         configured_tag = tag_name.strip()
         if not configured_tag:
@@ -1044,7 +1046,7 @@ async def helpoption_add(
         await interaction.response.send_message('Unable to derive a valid tag name from the provided label.', ephemeral=True)
         return
 
-    emoji_value: str | None = None
+    emoji_value: str | None = existing_config.emoji if existing_config else None
     if emoji is not None:
         try:
             emoji_value = normalise_help_option_emoji(emoji)
@@ -1052,7 +1054,7 @@ async def helpoption_add(
             await interaction.response.send_message(str(error), ephemeral=True)
             return
 
-    forum_channel_id: int | None = None
+    forum_channel_id: int | None = existing_config.forum_channel_id if existing_config else None
     forum_notice: str | None = None
     # Feature: optionally create a dedicated forum channel per help option for category organisation.
     if create_forum_channel:
