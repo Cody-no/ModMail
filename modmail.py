@@ -862,6 +862,14 @@ def slugify_forum_name(label: str) -> str:
     return slug[:100]
 
 
+def normalise_multiline_input(text: str | None) -> str | None:
+    """Allow moderators to enter escaped newline markers in slash command inputs."""
+
+    if text is None:
+        return None
+    return text.replace('\\n', '\n')
+
+
 try:
     with open(HELP_OPTIONS_FILE, 'r', encoding='utf-8') as help_options_file:
         loaded_help_options = json.load(help_options_file)
@@ -896,10 +904,10 @@ try:
                     forum_channel_id = int(raw_forum_id)
                 raw_opening_message = value.get('opening_message')
                 if isinstance(raw_opening_message, str) and raw_opening_message.strip():
-                    opening_message = raw_opening_message.strip()
+                    opening_message = normalise_multiline_input(raw_opening_message).strip()
                 raw_auto_close_message = value.get('auto_close_message')
                 if isinstance(raw_auto_close_message, str) and raw_auto_close_message.strip():
-                    auto_close_message = raw_auto_close_message.strip()
+                    auto_close_message = normalise_multiline_input(raw_auto_close_message).strip()
             elif isinstance(value, int):
                 role_id = value
             elif isinstance(value, str) and value.isdigit():
@@ -1300,13 +1308,15 @@ async def helpoption_add(
     if descriptor_value and len(descriptor_value) > 100:
         await interaction.response.send_message('Help option descriptions must be 100 characters or fewer.', ephemeral=True)
         return
-    # Feature: support per-option opening messages and auto-close replies.
-    opening_message_value = opening_message.strip() if opening_message else None
+    # Feature: support escaped newline markers in custom open/close messages.
+    opening_message_value = normalise_multiline_input(opening_message)
+    opening_message_value = opening_message_value.strip() if opening_message_value else None
     if opening_message_value and len(opening_message_value) > 1024:
         await interaction.response.send_message('Opening messages must be 1024 characters or fewer.', ephemeral=True)
         return
 
-    auto_close_message_value = auto_close_message.strip() if auto_close_message else None
+    auto_close_message_value = normalise_multiline_input(auto_close_message)
+    auto_close_message_value = auto_close_message_value.strip() if auto_close_message_value else None
     if auto_close_message_value and len(auto_close_message_value) > 1024:
         await interaction.response.send_message('Auto-close messages must be 1024 characters or fewer.', ephemeral=True)
         return
