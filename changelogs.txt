@@ -22,6 +22,7 @@
 * Documented the `!sendmany`, `!replymany`, and `!closemany` group workflow in the README so moderators know how to use the new commands.
 * Removed the broadcast forum workflow and its commands in favor of simpler group-tag automation.
 * Added `!sendmany`, `!replymany`, and `!closemany` commands for sending, replying, and closing groups of tickets via temporary tags.
+* Added per-help-option opening messages and auto-close messages when users pick a help option.
 * Persisted group tag membership in the database and clean up tags automatically when tickets close.
 * Refactored ticket closure into a reusable helper so every close path shares the same logging, transcript, and DM flow.
 * Ensured newly created ticket threads are fetched before use so the first DM no longer fails with Unknown Channel errors.

@@ -57,6 +57,9 @@ class HelpOptionDropdown(discord.ui.Select):
         role_id = option_config.role_id if option_config else None
         tag_name = option_config.tag_name if option_config and option_config.tag_name else selection
         tag_emoji = build_option_emoji(option_config.emoji) if option_config else None
+        # Feature: help options can define opening messages and auto-close behavior per selection.
+        opening_message_override = option_config.opening_message if option_config else None
+        auto_close_message = option_config.auto_close_message if option_config else None
         thread = await resolve_thread(self.thread_id)
         if thread is None:
             await interaction.response.send_message(
@@ -93,7 +96,7 @@ class HelpOptionDropdown(discord.ui.Select):
         acknowledgement_language: str | None = None
         if isinstance(self.view, HelpOptionView):
             try:
-                await self.view.handle_selection_completion(thread)
+                await self.view.handle_selection_completion(thread, open_message_override=opening_message_override)
             except Exception as error:
                 await interaction.followup.send(
                     f'Something went wrong while sending your message: {error}',
@@ -119,6 +122,14 @@ class HelpOptionDropdown(discord.ui.Select):
             except Exception:
                 pass
         await interaction.followup.send(acknowledgement_text)
+        if auto_close_message:
+            moderator = interaction.client.user or interaction.user
+            await close_ticket_thread(
+                thread,
+                moderator,
+                skip_confirmation=True,
+                close_message_override=auto_close_message
+            )
 
 
 class HelpOptionView(discord.ui.View):
@@ -152,7 +163,12 @@ class HelpOptionView(discord.ui.View):
         if help_options and options:
             self.add_item(HelpOptionDropdown(thread_id, placeholder, options))
 
-    async def handle_selection_completion(self, thread: discord.Thread) -> None:
+    async def handle_selection_completion(
+        self,
+        thread: discord.Thread,
+        *,
+        open_message_override: str | None = None
+    ) -> None:
         """Forward the pending message to the ticket thread once a help option is chosen."""
 
         if self.pending_message is None or self.guild is None or self.forwarded:
@@ -162,7 +178,8 @@ class HelpOptionView(discord.ui.View):
             thread,
             self.guild,
             ticket_create=self.ticket_create,
-            language=self.language
+            language=self.language,
+            open_message_override=open_message_override
         )
         self.forwarded = True
         self.pending_message = None
@@ -779,6 +796,8 @@ class HelpOptionConfig:
     tag_name: str | None = None
     emoji: str | None = None
     forum_channel_id: int | None = None
+    opening_message: str | None = None
+    auto_close_message: str | None = None
 
     def to_json(self) -> dict:
         payload: dict[str, int | str] = {}
@@ -792,6 +811,10 @@ class HelpOptionConfig:
             payload['emoji'] = self.emoji
         if self.forum_channel_id is not None:
             payload['forum_channel_id'] = self.forum_channel_id
+        if self.opening_message:
+            payload['opening_message'] = self.opening_message
+        if self.auto_close_message:
+            payload['auto_close_message'] = self.auto_close_message
         return payload
 
 
@@ -849,6 +872,8 @@ try:
             tag_name: str | None = None
             emoji: str | None = None
             forum_channel_id: int | None = None
+            opening_message: str | None = None
+            auto_close_message: str | None = None
             if isinstance(value, dict):
                 raw_role = value.get('role_id')
                 if isinstance(raw_role, int):
@@ -869,6 +894,12 @@ try:
                     forum_channel_id = raw_forum_id
                 elif isinstance(raw_forum_id, str) and raw_forum_id.isdigit():
                     forum_channel_id = int(raw_forum_id)
+                raw_opening_message = value.get('opening_message')
+                if isinstance(raw_opening_message, str) and raw_opening_message.strip():
+                    opening_message = raw_opening_message.strip()
+                raw_auto_close_message = value.get('auto_close_message')
+                if isinstance(raw_auto_close_message, str) and raw_auto_close_message.strip():
+                    auto_close_message = raw_auto_close_message.strip()
             elif isinstance(value, int):
                 role_id = value
             elif isinstance(value, str) and value.isdigit():
@@ -878,7 +909,9 @@ try:
                 descriptor=descriptor,
                 tag_name=tag_name,
                 emoji=emoji,
-                forum_channel_id=forum_channel_id
+                forum_channel_id=forum_channel_id,
+                opening_message=opening_message,
+                auto_close_message=auto_close_message
             )
 except FileNotFoundError:
     help_options = {}
@@ -1230,7 +1263,9 @@ help_option_group = app_commands.Group(name='helpoption', description='Manage ti
     descriptor='Short description shown in the dropdown menu.',
     tag_name='Optional forum tag name (max 20 characters).',
     emoji='Emoji shown in the dropdown and applied to the forum tag.',
-    create_forum_channel='Create a dedicated forum channel for this help option.'
+    create_forum_channel='Create a dedicated forum channel for this help option.',
+    opening_message='Custom ticket opening message to send after this option is selected.',
+    auto_close_message='Automatically close the ticket and use this closing message.'
 )
 async def helpoption_add(
     interaction: discord.Interaction,
@@ -1239,7 +1274,9 @@ async def helpoption_add(
     descriptor: str | None = None,
     tag_name: str | None = None,
     emoji: str | None = None,
-    create_forum_channel: bool = False
+    create_forum_channel: bool = False,
+    opening_message: str | None = None,
+    auto_close_message: str | None = None
 ) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
@@ -1263,9 +1300,21 @@ async def helpoption_add(
     if descriptor_value and len(descriptor_value) > 100:
         await interaction.response.send_message('Help option descriptions must be 100 characters or fewer.', ephemeral=True)
         return
+    # Feature: support per-option opening messages and auto-close replies.
+    opening_message_value = opening_message.strip() if opening_message else None
+    if opening_message_value and len(opening_message_value) > 1024:
+        await interaction.response.send_message('Opening messages must be 1024 characters or fewer.', ephemeral=True)
+        return
+
+    auto_close_message_value = auto_close_message.strip() if auto_close_message else None
+    if auto_close_message_value and len(auto_close_message_value) > 1024:
+        await interaction.response.send_message('Auto-close messages must be 1024 characters or fewer.', ephemeral=True)
+        return
+
+    existing_config = help_options.get(cleaned_name)
 
     default_tag_name = cleaned_name[:20].strip() or cleaned_name[:20]
-    tag_value = default_tag_name
+    tag_value = existing_config.tag_name if existing_config and existing_config.tag_name else default_tag_name
     if tag_name is not None:
         configured_tag = tag_name.strip()
         if not configured_tag:
@@ -1279,7 +1328,7 @@ async def helpoption_add(
         await interaction.response.send_message('Unable to derive a valid tag name from the provided label.', ephemeral=True)
         return
 
-    emoji_value: str | None = None
+    emoji_value: str | None = existing_config.emoji if existing_config else None
     if emoji is not None:
         try:
             emoji_value = normalise_help_option_emoji(emoji)
@@ -1287,7 +1336,7 @@ async def helpoption_add(
             await interaction.response.send_message(str(error), ephemeral=True)
             return
 
-    forum_channel_id: int | None = None
+    forum_channel_id: int | None = existing_config.forum_channel_id if existing_config else None
     forum_notice: str | None = None
     # Feature: optionally create a dedicated forum channel per help option for category organisation.
     if create_forum_channel:
@@ -1331,7 +1380,9 @@ async def helpoption_add(
         descriptor=descriptor_value,
         tag_name=tag_value,
         emoji=emoji_value,
-        forum_channel_id=forum_channel_id
+        forum_channel_id=forum_channel_id,
+        opening_message=opening_message_value,
+        auto_close_message=auto_close_message_value
     )
     save_help_options()
     pieces = [f'Help option **{cleaned_name}** has been saved.']
@@ -1347,6 +1398,10 @@ async def helpoption_add(
         pieces.append(f'Emoji: {emoji_value}.')
     if forum_notice:
         pieces.append(forum_notice)
+    if opening_message_value:
+        pieces.append('Custom opening message enabled.')
+    if auto_close_message_value:
+        pieces.append('Auto-close message enabled.')
     await interaction.response.send_message(' '.join(pieces), ephemeral=True)
 
 
@@ -1401,6 +1456,10 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
                 details.append(f'Forum {forum_channel.mention}')
             else:
                 details.append(f'Forum ID {option_config.forum_channel_id}')
+        if option_config.opening_message:
+            details.append('Opening message set')
+        if option_config.auto_close_message:
+            details.append('Auto-close message set')
         detail_text = f" ({'; '.join(details)})" if details else ''
         lines.append(f'• **{option_name}**{descriptor_text} → {mention}{detail_text}')
         await interaction.response.send_message('\n'.join(lines), ephemeral=True)
@@ -1615,7 +1674,8 @@ async def relay_user_message(
     guild: discord.Guild,
     *,
     ticket_create: bool,
-    language: str | None = None
+    language: str | None = None,
+    open_message_override: str | None = None
 ) -> None:
     confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
     ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
@@ -1650,10 +1710,11 @@ async def relay_user_message(
         if detected_language is None:
             sample_text = (message.content or '').strip() or 'Hello'
             detected_language = await detect_language(sample_text)
+        open_message = open_message_override if open_message_override is not None else config.open_message
         try:
-            translated_open = await localise_text(config.open_message, detected_language)
+            translated_open = await localise_text(open_message, detected_language)
         except Exception:
-            translated_open = config.open_message
+            translated_open = open_message
         await message.channel.send(embed=embed_creator('Ticket Created', translated_open, 'b', guild))
 
 
@@ -1865,7 +1926,8 @@ async def close_ticket_thread(
     user_reason: str | None = None,
     original_reason: str | None = None,
     language: str | None = None,
-    translation_notice: str | None = None
+    translation_notice: str | None = None,
+    close_message_override: str | None = None
 
 ) -> tuple[bool, str | None]:
     """Close a modmail ticket thread, returning success and an optional error message."""
@@ -2060,10 +2122,11 @@ async def close_ticket_thread(
         htm_log.write('</ul></main></body></html>')
 
     guild = thread.guild or bot.get_guild(config.guild_id)
+    close_message = close_message_override if close_message_override is not None else config.close_message
     try:
-        translated_close = await localise_text(config.close_message, closing_language)
+        translated_close = await localise_text(close_message, closing_language)
     except Exception:
-        translated_close = config.close_message
+        translated_close = close_message
     embed_user = embed_creator('Ticket Closed', translated_close, 'b', guild, time=True)
     embed_guild = embed_creator('Ticket Closed', '', 'r', user or guild, moderator, anon=log_anon)
 
