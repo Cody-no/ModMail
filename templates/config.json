@@ -12,5 +12,6 @@
   "open_message": "open_message",
   "close_message": "close_message",
   "anonymous_tickets": false,
-  "send_with_command_only": false
+  "send_with_command_only": false,
+  "voice_lock_role_ids": []
 }

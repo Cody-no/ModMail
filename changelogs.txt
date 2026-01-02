@@ -1,3 +1,4 @@
+* Updated voice lock role enforcement to avoid notifying users already in a call, while letting channel managers connect.
 * Added support for \n escape sequences in custom help option open/close messages so multi-line notices can be entered via slash commands.
 * Ensured help options that create their own forums open tickets inside those forums and keep tags/cleanup in sync.
 * Extended `/helpoption add` with custom tag names, emoji, and on-demand forum channel creation that inherits the configured category permissions.

@@ -621,6 +621,7 @@ class Config:
     close_message: str
     anonymous_tickets: bool
     send_with_command_only: bool
+    voice_lock_role_ids: list[int] = dataclasses.field(default_factory=list)
     channel_ids: [] = dataclasses.field(init=False)
 
 
@@ -1112,6 +1113,24 @@ def is_helper(ctx):
 
 def is_mod(ctx):
     return ctx.guild is not None and ctx.author.top_role >= ctx.guild.get_role(config.mod_role_id)
+
+# Feature: let voice lock roles bypass locked voice channels without messaging active callers.
+def member_has_voice_lock_role(member: discord.Member) -> bool:
+    return any(role.id in config.voice_lock_role_ids for role in member.roles)
+
+
+def member_can_bypass_voice_lock(
+    member: discord.Member,
+    channel: discord.VoiceChannel | discord.StageChannel
+) -> bool:
+    permissions = channel.permissions_for(member)
+    return permissions.manage_channels or member_has_voice_lock_role(member)
+
+
+def is_voice_channel_locked(channel: discord.VoiceChannel | discord.StageChannel) -> bool:
+    overwrite = channel.overwrites_for(channel.guild.default_role)
+    return overwrite.connect is False
+
 
 def get_modmail_forum_ids() -> set[int]:
     forum_ids = {config.forum_channel_id}
@@ -1888,6 +1907,30 @@ async def on_ready():
         else:
             bot.tree_synced = True
     print(f'{bot.user.name} has connected to Discord!')
+
+
+# Feature: enforce voice lock roles on join without notifying current callers.
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if after.channel is None or after.channel == before.channel:
+        return
+    channel = after.channel
+    if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        return
+    if not config.voice_lock_role_ids:
+        return
+    if not is_voice_channel_locked(channel):
+        return
+    if member_can_bypass_voice_lock(member, channel):
+        return
+    try:
+        await member.move_to(None, reason='Voice lock role required.')
+    except discord.HTTPException:
+        return
+    try:
+        await member.send(f'You do not have permission to join {channel.name}.')
+    except discord.HTTPException:
+        pass
 
 
 
