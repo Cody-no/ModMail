@@ -1890,6 +1890,34 @@ async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
 
 
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member) -> None:
+    # Feature: notify users when they receive the Voice Manage Roles role.
+    if before.roles == after.roles:
+        return
+
+    before_role_ids = {role.id for role in before.roles}
+    added_roles = [role for role in after.roles if role.id not in before_role_ids]
+    voice_manage_role = next(
+        (role for role in added_roles if role.name == 'Voice Manage Roles'),
+        None
+    )
+    if voice_manage_role is None:
+        return
+
+    try:
+        await after.send(
+            'You were given the Voice Manage Roles role. You can now:\n'
+            '- Manage voice channels\n'
+            '- Move members between voice channels\n'
+            '- Mute members in voice channels\n'
+            '- Deafen members in voice channels\n'
+            '- Disconnect members from voice channels'
+        )
+    except discord.Forbidden:
+        pass
+
+
 
 async def error_handler(error, message=None):
 
