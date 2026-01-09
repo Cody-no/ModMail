@@ -2434,18 +2434,25 @@ def normalize_opening_language(language: str | None) -> str:
     normalised = language.strip().lower()
     if not normalised:
         return 'english'
-    inconclusive_markers = (
+    inconclusive_exact = {
         'unknown',
         'undetermined',
         'unidentified',
         'unclear',
+        'n/a',
+        'na',
+    }
+    inconclusive_phrases = (
         'cannot determine',
         'cannot detect',
         'not sure',
-        'n/a',
-        'na'
     )
-    if any(marker in normalised for marker in inconclusive_markers):
+    if normalised in inconclusive_exact:
+        return 'english'
+    if any(marker in normalised for marker in inconclusive_phrases):
+        return 'english'
+    tokens = normalised.replace('-', ' ').replace('_', ' ').split()
+    if any(token in inconclusive_exact for token in tokens):
         return 'english'
     return language
 
