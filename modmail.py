@@ -296,6 +296,24 @@ class ConfigSetupView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+    # Feature: surface config wizard errors to the user and error channel instead of failing silently.
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item
+    ) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                'The configuration wizard ran into an error. Please try again.',
+                ephemeral=True
+            )
+        error_channel = get_error_channel()
+        if error_channel is not None:
+            await error_channel.send(
+                embed=embed_creator('Config Wizard Error', str(error), 'e')
+            )
+        raise error
 
     def build_embed(self) -> discord.Embed:
         def describe_channel(channel_id: int, label: str) -> str:
@@ -509,7 +527,6 @@ class ConfigTextButton(discord.ui.Button):
         await interaction.response.send_modal(
             ConfigTextModal(self.view, self.field_name, self.label, current_value)
         )
-        self.stop()
 
 
 # Feature: translate dropdown option labels and descriptions for users selecting categories.
@@ -1318,6 +1335,24 @@ async def delete_group_tag(forum_channel: discord.ForumChannel, tag: discord.For
 help_option_group = app_commands.Group(name='helpoption', description='Manage ticket help options.')
 
 
+# Feature: provide help option autocomplete and an edit command for updating existing entries.
+async def help_option_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    """Offer configured help option names for slash command completion."""
+
+    query = current.strip().lower()
+    filtered = []
+    for option_name in sorted(help_options.keys(), key=str.lower):
+        if query and query not in option_name.lower():
+            continue
+        filtered.append(option_name)
+        if len(filtered) >= 25:
+            break
+    return [app_commands.Choice(name=label, value=label) for label in filtered]
+
+
 @help_option_group.command(name='add', description='Add or update a help option for new tickets.')
 @app_commands.guild_only()
 @app_commands.describe(
@@ -1470,9 +1505,161 @@ async def helpoption_add(
     await interaction.response.send_message(' '.join(pieces), ephemeral=True)
 
 
+@help_option_group.command(name='edit', description='Edit an existing help option.')
+@app_commands.guild_only()
+@app_commands.describe(
+    name='The help option to update.',
+    role='The role to ping when selected. Leave blank to keep the current setting.',
+    descriptor='Short description shown in the dropdown menu. Leave blank to keep the current setting.',
+    tag_name='Optional forum tag name (max 20 characters). Leave blank to keep the current tag.',
+    emoji='Emoji shown in the dropdown and applied to the forum tag. Leave blank to keep the current emoji.',
+    create_forum_channel='Create or reuse a dedicated forum channel for this help option.',
+    opening_message='Custom ticket opening message to send after this option is selected.',
+    auto_close_message='Automatically close the ticket and use this closing message.'
+)
+@app_commands.autocomplete(name=help_option_name_autocomplete)
+async def helpoption_edit(
+    interaction: discord.Interaction,
+    name: str,
+    role: discord.Role | None = None,
+    descriptor: str | None = None,
+    tag_name: str | None = None,
+    emoji: str | None = None,
+    create_forum_channel: bool = False,
+    opening_message: str | None = None,
+    auto_close_message: str | None = None
+) -> None:
+    if not interaction_is_mod(interaction):
+        await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
+        return
+
+    cleaned_name = name.strip()
+    if cleaned_name not in help_options:
+        await interaction.response.send_message(f'No help option named **{cleaned_name}** exists.', ephemeral=True)
+        return
+
+    existing_config = help_options[cleaned_name]
+    # Feature: preserve existing values when optional edit inputs are omitted.
+    role_id = existing_config.role_id if role is None else role.id
+    descriptor_value = existing_config.descriptor if descriptor is None else descriptor.strip() or None
+    if descriptor_value and len(descriptor_value) > 100:
+        await interaction.response.send_message('Help option descriptions must be 100 characters or fewer.', ephemeral=True)
+        return
+
+    opening_message_value = existing_config.opening_message
+    if opening_message is not None:
+        opening_message_value = normalise_multiline_input(opening_message)
+        opening_message_value = opening_message_value.strip() if opening_message_value else None
+        if opening_message_value and len(opening_message_value) > 1024:
+            await interaction.response.send_message('Opening messages must be 1024 characters or fewer.', ephemeral=True)
+            return
+
+    auto_close_message_value = existing_config.auto_close_message
+    if auto_close_message is not None:
+        auto_close_message_value = normalise_multiline_input(auto_close_message)
+        auto_close_message_value = auto_close_message_value.strip() if auto_close_message_value else None
+        if auto_close_message_value and len(auto_close_message_value) > 1024:
+            await interaction.response.send_message('Auto-close messages must be 1024 characters or fewer.', ephemeral=True)
+            return
+
+    default_tag_name = cleaned_name[:20].strip() or cleaned_name[:20]
+    tag_value = existing_config.tag_name or default_tag_name
+    if tag_name is not None:
+        configured_tag = tag_name.strip()
+        if not configured_tag:
+            await interaction.response.send_message('Tag names cannot be empty when provided.', ephemeral=True)
+            return
+        if len(configured_tag) > 20:
+            await interaction.response.send_message('Tag names must be 20 characters or fewer.', ephemeral=True)
+            return
+        tag_value = configured_tag
+    if not tag_value:
+        await interaction.response.send_message('Unable to derive a valid tag name from the provided label.', ephemeral=True)
+        return
+
+    emoji_value: str | None = existing_config.emoji
+    if emoji is not None:
+        try:
+            emoji_value = normalise_help_option_emoji(emoji)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+
+    forum_channel_id: int | None = existing_config.forum_channel_id
+    forum_notice: str | None = None
+    if create_forum_channel:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message('Forum channels can only be created inside a server.', ephemeral=True)
+            return
+        category_channel = guild.get_channel(config.category_id)
+        if not isinstance(category_channel, discord.CategoryChannel):
+            await interaction.response.send_message('Configured category_id must reference a category channel.', ephemeral=True)
+            return
+        target_name = slugify_forum_name(cleaned_name)
+        forum_channel: discord.ForumChannel | None = None
+        for channel in category_channel.channels:
+            if isinstance(channel, discord.ForumChannel) and channel.name == target_name:
+                forum_channel = channel
+                break
+        if forum_channel is None:
+            create_forum = getattr(guild, 'create_forum', None)
+            try:
+                if callable(create_forum):
+                    forum_channel = await create_forum(name=target_name, category=category_channel)
+                else:
+                    forum_channel = await guild.create_text_channel(
+                        name=target_name,
+                        category=category_channel,
+                        type=discord.ChannelType.forum
+                    )
+            except discord.HTTPException as error:
+                await interaction.response.send_message(
+                    f'Unable to create the forum channel: {error}',
+                    ephemeral=True
+                )
+                return
+        forum_channel_id = forum_channel.id
+        forum_notice = f'Forum channel {forum_channel.mention} is assigned to this option.'
+
+    help_options[cleaned_name] = HelpOptionConfig(
+        role_id=role_id,
+        descriptor=descriptor_value,
+        tag_name=tag_value,
+        emoji=emoji_value,
+        forum_channel_id=forum_channel_id,
+        opening_message=opening_message_value,
+        auto_close_message=auto_close_message_value
+    )
+    save_help_options()
+    pieces = [f'Help option **{cleaned_name}** has been updated.']
+    if role_id is not None:
+        role_target = interaction.guild.get_role(role_id) if interaction.guild is not None else None
+        if role_target is not None:
+            pieces.append(f'It will mention {role_target.mention}.')
+        else:
+            pieces.append(f'It will mention role ID `{role_id}`.')
+    else:
+        pieces.append('It will not mention a role automatically.')
+    if descriptor_value:
+        pieces.append(f'Description: {descriptor_value}')
+    if tag_value:
+        pieces.append(f'Forum tag: `{tag_value}`.')
+    if emoji_value:
+        pieces.append(f'Emoji: {emoji_value}.')
+    if forum_notice:
+        pieces.append(forum_notice)
+    if opening_message_value:
+        pieces.append('Custom opening message enabled.')
+    if auto_close_message_value:
+        pieces.append('Auto-close message enabled.')
+    await interaction.response.send_message(' '.join(pieces), ephemeral=True)
+
+
 @help_option_group.command(name='remove', description='Remove a help option.')
 @app_commands.guild_only()
 @app_commands.describe(name='The help option to remove.')
+@app_commands.autocomplete(name=help_option_name_autocomplete)
 async def helpoption_remove(interaction: discord.Interaction, name: str) -> None:
     if not interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
