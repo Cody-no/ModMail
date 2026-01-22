@@ -88,7 +88,7 @@ class HelpOptionDropdown(discord.ui.Select):
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer()
         await apply_group_tag(thread, forum_tag)
 
         guild = interaction.client.get_guild(config.guild_id)
@@ -103,8 +103,7 @@ class HelpOptionDropdown(discord.ui.Select):
             notification = f'{role_mention} {notification}'
         await thread.send(notification)
 
-        acknowledgement_text = 'Thanks! We will be with you shortly.'
-        acknowledgement_language: str | None = None
+        acknowledgement_text: str | None = None
         if isinstance(self.view, HelpOptionView):
             try:
                 await self.view.handle_selection_completion(thread, open_message_override=opening_message_override)
@@ -113,8 +112,7 @@ class HelpOptionDropdown(discord.ui.Select):
                     f'Something went wrong while sending your message: {error}',
                 )
                 return
-            acknowledgement_text = self.view.acknowledgement_text or acknowledgement_text
-            acknowledgement_language = self.view.language
+            acknowledgement_text = self.view.acknowledgement_text
             await self.view.disable(interaction)
         else:
             if self.view is not None:
@@ -124,15 +122,8 @@ class HelpOptionDropdown(discord.ui.Select):
                     await interaction.message.edit(view=self.view)
                 except discord.HTTPException:
                     pass
-        if (
-            acknowledgement_language
-            and acknowledgement_text == 'Thanks! We will be with you shortly.'
-        ):
-            try:
-                acknowledgement_text = await localise_text(acknowledgement_text, acknowledgement_language)
-            except Exception:
-                pass
-        await interaction.followup.send(acknowledgement_text)
+        if acknowledgement_text:
+            await interaction.followup.send(acknowledgement_text)
         if auto_close_message:
             moderator = interaction.client.user or interaction.user
             await close_ticket_thread(
@@ -149,7 +140,7 @@ class HelpOptionView(discord.ui.View):
         thread_id: int | None,
         *,
         placeholder: str = 'Select the help topic that best matches your request.',
-        acknowledgement: str = 'Thanks! We will be with you shortly.',
+        acknowledgement: str | None = None,
         language: str | None = None,
         pending_message: discord.Message | None = None,
         guild: discord.Guild | None = None,
@@ -1762,11 +1753,6 @@ def build_translation_segments() -> list[TranslationSegment]:
             discord.TextStyle.long
         ),
         TranslationSegment(
-            'Acknowledgement Message',
-            'Thanks! We will be with you shortly.',
-            discord.TextStyle.short
-        ),
-        TranslationSegment(
             'Expiry Notice',
             'The selection expired before we could send your message. Please send it again so we can help.',
             discord.TextStyle.long
@@ -2793,18 +2779,15 @@ async def on_message(message):
             placeholder_base = 'Select the help topic that best matches your request.'
             prompt_title_base = 'How can we help?'
             prompt_body_base = 'Choose the option that best matches the support you need.'
-            acknowledgement_base = 'Thanks! We will be with you shortly.'
             expiry_base = 'The selection expired before we could send your message. Please send it again so we can help.'
             placeholder_text = await localise_text(placeholder_base, detected_language)
             prompt_title = await localise_text(prompt_title_base, detected_language)
             prompt_body = await localise_text(prompt_body_base, detected_language)
-            acknowledgement_text = await localise_text(acknowledgement_base, detected_language)
             dropdown_options = await build_localised_help_options(detected_language)
             thread_id = channel.id if isinstance(channel, discord.Thread) else None
             help_view = HelpOptionView(
                 thread_id,
                 placeholder=placeholder_text,
-                acknowledgement=acknowledgement_text,
                 language=detected_language,
                 pending_message=message,
                 guild=guild,
