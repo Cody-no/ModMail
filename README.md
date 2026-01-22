@@ -19,6 +19,8 @@ However, this bot has a few additional features that make it unique:
 
 - `!send <id> <message>` creates a new ticket and sends an anonymous message to a user that does not already have a ticket open.
 
+- `!activetickets` shows how many tickets are currently active.
+
 - **Ai Summaries** have been added to the ticket closed log so other moderators can get an idea of what happened in the ticket at a glance. This is a feature inspired by Chamburr's Modmail
 
 - `!replyt <language> <message>`+`!areplyt <language> <message>` reply to the ticket with a translated version of your message. You have to include the language you wish to translate to in the command. The original message is sent
