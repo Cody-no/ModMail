@@ -1,4 +1,5 @@
 * Persisted help option prompt metadata so expired dropdowns are cleaned up after restarts and users are notified to resend their messages.
+* Added a resend reminder line to the help option prompt body so users know to retry if they cannot select an option.
 * Removed the help option acknowledgement reply so users are not sent the default "Thanks! We will be with you shortly." message.
 * Added support for \n escape sequences in custom help option open/close messages so multi-line notices can be entered via slash commands.
 * Ensured help options that create their own forums open tickets inside those forums and keep tags/cleanup in sync.
