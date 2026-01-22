@@ -847,6 +847,15 @@ def build_guarded_payload(text: str) -> str:
     sanitised = text.replace(PROMPT_GUARD_START, '').replace(PROMPT_GUARD_END, '')
     return f'{PROMPT_GUARD_START}{sanitised}{PROMPT_GUARD_END}'
 
+
+def clean_guard_markers(text: str) -> str:
+    """Strip guard markers from model responses to avoid leaking prompt delimiters."""
+
+    if not text:
+        return ''
+    cleaned = text.replace(PROMPT_GUARD_START, '').replace(PROMPT_GUARD_END, '')
+    return cleaned.strip()
+
 try:
     with open('snippets.json', 'r', encoding='utf-8') as snippets_file:
         snippets = json.load(snippets_file)
@@ -2766,6 +2775,7 @@ async def translate_text(text: str) -> str:
             ]
         )
         translated = response.choices[0].message.content.strip()
+        translated = clean_guard_markers(translated)
         # The notice text lives only in the system prompt so it never
         # appears in the translated result returned to the bot
         if translated and translated != text:
@@ -2799,6 +2809,7 @@ async def translate_to_language(text: str, language: str) -> str:
             ]
         )
         translated = response.choices[0].message.content.strip()
+        translated = clean_guard_markers(translated)
         # The notice guides the model but is never included in the final
         # translated text sent back to moderators or users
         if translated and translated != text:
