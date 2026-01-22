@@ -603,10 +603,14 @@ class ConfigTextModal(discord.ui.Modal):
         super().__init__(title=f'Update {label}')
         self.view_ref = view
         self.field_name = field_name
+        max_length = 1800
+        trimmed_value = current_value or ''
+        if len(trimmed_value) > max_length:
+            trimmed_value = trimmed_value[:max_length]
         self.value_input = discord.ui.TextInput(
             label=label,
-            default=current_value,
-            max_length=1800
+            default=trimmed_value,
+            max_length=max_length
         )
         self.add_item(self.value_input)
 
