@@ -234,6 +234,8 @@ class ConfigSetupView(discord.ui.View):
         self.author_id = author_id
         self.guild = guild
         self.message: discord.Message | None = None
+        self.page = 0
+        self.page_count = 3
         # Feature: emit console debug traces for config wizard interactions to aid troubleshooting.
         self.debug_log('Initialized config wizard view.', guild_id=guild.id, author_id=author_id)
         self.draft = {
@@ -251,36 +253,43 @@ class ConfigSetupView(discord.ui.View):
             'anonymous_tickets': config.anonymous_tickets,
             'send_with_command_only': getattr(config, 'send_with_command_only', False)
         }
-        self.add_item(ConfigGuildSelect(guild))
-        self.add_item(ConfigChannelSelect(
+        self.clear_items()
+        self.guild_select = ConfigGuildSelect(guild)
+        self.category_select = ConfigChannelSelect(
             'category_id',
             'Select the ticket category (legacy)',
             [discord.ChannelType.category]
-        ))
-        self.add_item(ConfigChannelSelect(
+        )
+        self.forum_select = ConfigChannelSelect(
             'forum_channel_id',
             'Select the modmail forum channel',
             [discord.ChannelType.forum]
-        ))
-        self.add_item(ConfigChannelSelect(
+        )
+        self.log_channel_select = ConfigChannelSelect(
             'log_channel_id',
             'Select the log channel',
             [discord.ChannelType.text]
-        ))
-        self.add_item(ConfigChannelSelect(
+        )
+        self.error_channel_select = ConfigChannelSelect(
             'error_channel_id',
             'Select the error channel',
             [discord.ChannelType.text]
-        ))
-        self.add_item(ConfigRoleSelect('helper_role_id', 'Select the helper role'))
-        self.add_item(ConfigRoleSelect('mod_role_id', 'Select the moderator role'))
-        self.add_item(ConfigUserSelect('bot_owner_id', 'Select the bot owner'))
-        self.add_item(ConfigBooleanSelect('anonymous_tickets', 'Anonymous ticket names?'))
-        self.add_item(ConfigBooleanSelect('send_with_command_only', 'Send with commands only?'))
-        self.add_item(ConfigTextSelect('prefix', 'Bot prefix'))
+        )
+        self.helper_role_select = ConfigRoleSelect('helper_role_id', 'Select the helper role')
+        self.mod_role_select = ConfigRoleSelect('mod_role_id', 'Select the moderator role')
+        self.bot_owner_select = ConfigUserSelect('bot_owner_id', 'Select the bot owner')
+        self.anonymous_select = ConfigBooleanSelect('anonymous_tickets', 'Anonymous ticket names?')
+        self.send_with_command_select = ConfigBooleanSelect('send_with_command_only', 'Send with commands only?')
+        self.prefix_select = ConfigTextSelect('prefix', 'Bot prefix')
         # Feature: force ticket message updates through modals to capture longer text cleanly.
-        self.add_item(ConfigTextButton('open_message', 'Update ticket open message'))
-        self.add_item(ConfigTextButton('close_message', 'Update ticket close message'))
+        self.open_message_button = ConfigTextButton('open_message', 'Update ticket open message')
+        self.close_message_button = ConfigTextButton('close_message', 'Update ticket close message')
+        # Feature: add wizard pagination so each page stays within Discord's component row limits.
+        self.previous_button = discord.ui.Button(label='Previous', style=discord.ButtonStyle.secondary)
+        self.next_button = discord.ui.Button(label='Next', style=discord.ButtonStyle.secondary)
+        self.previous_button.callback = self.go_previous_page
+        self.next_button.callback = self.go_next_page
+        self.build_page()
 
     def debug_log(self, message: str, **context: object) -> None:
         """Print debug trace messages for config wizard interactions."""
@@ -290,6 +299,56 @@ class ConfigSetupView(discord.ui.View):
             print(f'[ConfigWizard] {message} ({context_details})')
             return
         print(f'[ConfigWizard] {message}')
+
+    def build_page(self) -> None:
+        self.clear_items()
+        if self.page == 0:
+            items_with_rows = [
+                (self.guild_select, 0),
+                (self.category_select, 1),
+                (self.forum_select, 2),
+                (self.log_channel_select, 3)
+            ]
+        elif self.page == 1:
+            items_with_rows = [
+                (self.error_channel_select, 0),
+                (self.helper_role_select, 1),
+                (self.mod_role_select, 2),
+                (self.bot_owner_select, 3)
+            ]
+        else:
+            items_with_rows = [
+                (self.anonymous_select, 0),
+                (self.send_with_command_select, 1),
+                (self.prefix_select, 2),
+                (self.open_message_button, 3),
+                (self.close_message_button, 3)
+            ]
+        for item, row in items_with_rows:
+            item.row = row
+            self.add_item(item)
+        self.previous_button.disabled = self.page == 0
+        self.next_button.disabled = self.page >= self.page_count - 1
+        self.previous_button.row = 4
+        self.next_button.row = 4
+        self.save.row = 4
+        self.cancel.row = 4
+        self.add_item(self.previous_button)
+        self.add_item(self.next_button)
+        self.add_item(self.save)
+        self.add_item(self.cancel)
+
+    async def go_previous_page(self, interaction: discord.Interaction) -> None:
+        if self.page > 0:
+            self.page -= 1
+        self.build_page()
+        await self.update_message(interaction)
+
+    async def go_next_page(self, interaction: discord.Interaction) -> None:
+        if self.page < self.page_count - 1:
+            self.page += 1
+        self.build_page()
+        await self.update_message(interaction)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.author_id:
