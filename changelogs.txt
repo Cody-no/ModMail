@@ -79,3 +79,4 @@
 * Added `/helpoption edit` along with help option name autocomplete to speed up edits/removals while preserving existing settings when fields are omitted.
 * Added verbose console debug traces throughout the config wizard to aid troubleshooting.
 * Added `!activetickets` so helpers can check the number of active tickets in Discord.
+* Trimmed config wizard modal defaults to stay within Discord input limits and avoid invalid form errors.
