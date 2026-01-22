@@ -1972,7 +1972,8 @@ def build_translation_segments() -> list[TranslationSegment]:
         ),
         TranslationSegment(
             'Prompt Body',
-            'Choose the option that best matches the support you need.',
+            'Choose the option that best matches the support you need.\n'
+            '-# if you unable to select an option, please resend your message',
             discord.TextStyle.long
         ),
         TranslationSegment(
@@ -3057,7 +3058,10 @@ async def on_message(message):
             detected_language = await detect_language(sample_text)
             placeholder_base = 'Select the help topic that best matches your request.'
             prompt_title_base = 'How can we help?'
-            prompt_body_base = 'Choose the option that best matches the support you need.'
+            prompt_body_base = (
+                'Choose the option that best matches the support you need.\n'
+                '-# if you unable to select an option, please resend your message'
+            )
             expiry_base = HELP_OPTION_EXPIRY_NOTICE
             placeholder_text = await localise_text(placeholder_base, detected_language)
             prompt_title = await localise_text(prompt_title_base, detected_language)
