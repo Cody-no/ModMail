@@ -1,4 +1,6 @@
 * Persisted help option prompt metadata so expired dropdowns are cleaned up after restarts and users are notified to resend their messages.
+* Ensured the config wizard message modals use paragraph inputs so multi-line defaults no longer fail Discord validation.
+* Increased config wizard modal defaults to allow up to 4000 characters for longer ticket messages.
 * Stripped translation guard markers from AI responses so help prompts never show the <TEXT> wrappers to users.
 * Added a resend reminder line to the help option prompt body so users know to retry if they cannot select an option.
 * Removed the help option acknowledgement reply so users are not sent the default "Thanks! We will be with you shortly." message.
