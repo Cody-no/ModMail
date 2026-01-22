@@ -88,7 +88,17 @@ class HelpOptionDropdown(discord.ui.Select):
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        # Feature: acknowledge help option selections with a translated confirmation message.
+        confirmation_text = f'You have selected: {selection}'
+        if isinstance(self.view, HelpOptionView) and self.view.language:
+            try:
+                confirmation_text = await localise_text(confirmation_text, self.view.language)
+            except Exception:
+                pass
+        if interaction.response.is_done():
+            await interaction.followup.send(confirmation_text)
+        else:
+            await interaction.response.send_message(confirmation_text)
         await apply_group_tag(thread, forum_tag)
 
         guild = interaction.client.get_guild(config.guild_id)
