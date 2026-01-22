@@ -71,3 +71,4 @@
 * Defaulted auto-translated opening messages to English when language detection is inconclusive.
 * Updated language detection prompt to return English when the language cannot be determined.
 * Added `/helpoption edit` along with help option name autocomplete to speed up edits/removals while preserving existing settings when fields are omitted.
+* Added verbose console debug traces throughout the config wizard to aid troubleshooting.

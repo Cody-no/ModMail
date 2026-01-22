@@ -236,6 +236,8 @@ class ConfigSetupView(discord.ui.View):
         self.author_id = author_id
         self.guild = guild
         self.message: discord.Message | None = None
+        # Feature: emit console debug traces for config wizard interactions to aid troubleshooting.
+        self.debug_log('Initialized config wizard view.', guild_id=guild.id, author_id=author_id)
         self.draft = {
             'guild_id': guild.id,
             'category_id': config.category_id,
@@ -282,13 +284,33 @@ class ConfigSetupView(discord.ui.View):
         self.add_item(ConfigTextButton('open_message', 'Update ticket open message'))
         self.add_item(ConfigTextButton('close_message', 'Update ticket close message'))
 
+    def debug_log(self, message: str, **context: object) -> None:
+        """Print debug trace messages for config wizard interactions."""
+
+        if context:
+            context_details = ', '.join(f'{key}={value!r}' for key, value in context.items())
+            print(f'[ConfigWizard] {message} ({context_details})')
+            return
+        print(f'[ConfigWizard] {message}')
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.author_id:
+            self.debug_log(
+                'Interaction check passed.',
+                user_id=interaction.user.id,
+                channel_id=getattr(interaction.channel, 'id', None)
+            )
             return True
+        self.debug_log(
+            'Interaction check failed: non-owner attempted to use wizard.',
+            user_id=interaction.user.id,
+            author_id=self.author_id
+        )
         await interaction.response.send_message('Only the setup owner can use this wizard.', ephemeral=True)
         return False
 
     async def on_timeout(self) -> None:
+        self.debug_log('Wizard timed out; disabling controls.')
         for child in self.children:
             child.disabled = True
         if self.message is not None:
@@ -303,6 +325,11 @@ class ConfigSetupView(discord.ui.View):
         error: Exception,
         _item: discord.ui.Item
     ) -> None:
+        self.debug_log(
+            'Wizard error encountered.',
+            error=str(error),
+            user_id=getattr(interaction.user, 'id', None)
+        )
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 'The configuration wizard ran into an error. Please try again.',
@@ -316,6 +343,7 @@ class ConfigSetupView(discord.ui.View):
         raise error
 
     def build_embed(self) -> discord.Embed:
+        self.debug_log('Building config wizard embed preview.')
         def describe_channel(channel_id: int, label: str) -> str:
             channel = self.guild.get_channel(channel_id)
             if channel is None:
@@ -363,6 +391,11 @@ class ConfigSetupView(discord.ui.View):
         return embed
 
     async def update_message(self, interaction: discord.Interaction | None = None) -> None:
+        self.debug_log(
+            'Updating wizard message.',
+            has_interaction=interaction is not None,
+            message_id=getattr(self.message, 'id', None)
+        )
         embed = self.build_embed()
         if interaction is not None and not interaction.response.is_done():
             await interaction.response.edit_message(embed=embed, view=self)
@@ -371,6 +404,7 @@ class ConfigSetupView(discord.ui.View):
             await self.message.edit(embed=embed, view=self)
 
     async def persist_config(self) -> None:
+        self.debug_log('Persisting config draft to disk.', draft_keys=list(self.draft.keys()))
         with open('config.json', 'r', encoding='utf-8') as config_file:
             config_data = json.load(config_file)
         config_data.update(self.draft)
@@ -378,12 +412,15 @@ class ConfigSetupView(discord.ui.View):
             json.dump(config_data, config_file, ensure_ascii=False, indent=2)
         config.update(normalise_config_keys(config_data))
         config.token = os.getenv('DISCORD_TOKEN', config.token)
+        self.debug_log('Config draft persisted successfully.')
 
     @discord.ui.button(label='Save', style=discord.ButtonStyle.green)
     async def save(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        self.debug_log('Save button pressed.', user_id=interaction.user.id)
         try:
             await self.persist_config()
         except Exception as error:
+            self.debug_log('Save failed.', error=str(error))
             await interaction.response.send_message(f'Failed to save config: {error}', ephemeral=True)
             return
         for child in self.children:
@@ -392,15 +429,18 @@ class ConfigSetupView(discord.ui.View):
             embed=embed_creator('Config Saved', 'Configuration has been updated.', 'g'),
             view=self
         )
+        self.debug_log('Save completed; controls disabled.')
 
     @discord.ui.button(label='Cancel', style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        self.debug_log('Cancel button pressed.', user_id=interaction.user.id)
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
             embed=embed_creator('Config Setup Cancelled', 'No changes were saved.', 'r'),
             view=self
         )
+        self.debug_log('Cancel completed; controls disabled.')
 
 
 class ConfigGuildSelect(discord.ui.Select):
@@ -412,6 +452,11 @@ class ConfigGuildSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not isinstance(self.view, ConfigSetupView):
             return
+        self.view.debug_log(
+            'Guild selection confirmed.',
+            guild_id=self.guild_id,
+            user_id=interaction.user.id
+        )
         self.view.draft['guild_id'] = self.guild_id
         await self.view.update_message(interaction)
 
@@ -425,6 +470,12 @@ class ConfigChannelSelect(discord.ui.ChannelSelect):
         if not isinstance(self.view, ConfigSetupView):
             return
         channel = self.values[0]
+        self.view.debug_log(
+            'Channel selected.',
+            field=self.field_name,
+            channel_id=channel.id,
+            user_id=interaction.user.id
+        )
         self.view.draft[self.field_name] = channel.id
         await self.view.update_message(interaction)
 
@@ -438,6 +489,12 @@ class ConfigRoleSelect(discord.ui.RoleSelect):
         if not isinstance(self.view, ConfigSetupView):
             return
         role = self.values[0]
+        self.view.debug_log(
+            'Role selected.',
+            field=self.field_name,
+            role_id=role.id,
+            user_id=interaction.user.id
+        )
         self.view.draft[self.field_name] = role.id
         await self.view.update_message(interaction)
 
@@ -451,6 +508,12 @@ class ConfigUserSelect(discord.ui.UserSelect):
         if not isinstance(self.view, ConfigSetupView):
             return
         user = self.values[0]
+        self.view.debug_log(
+            'User selected.',
+            field=self.field_name,
+            selected_user_id=user.id,
+            user_id=interaction.user.id
+        )
         self.view.draft[self.field_name] = user.id
         await self.view.update_message(interaction)
 
@@ -467,7 +530,14 @@ class ConfigBooleanSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not isinstance(self.view, ConfigSetupView):
             return
-        self.view.draft[self.field_name] = self.values[0] == 'true'
+        new_value = self.values[0] == 'true'
+        self.view.debug_log(
+            'Boolean selection updated.',
+            field=self.field_name,
+            value=new_value,
+            user_id=interaction.user.id
+        )
+        self.view.draft[self.field_name] = new_value
         await self.view.update_message(interaction)
 
 
@@ -485,6 +555,12 @@ class ConfigTextModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self.view_ref.draft[self.field_name] = str(self.value_input.value)
+        self.view_ref.debug_log(
+            'Text modal submitted.',
+            field=self.field_name,
+            user_id=interaction.user.id,
+            length=len(self.value_input.value)
+        )
         await interaction.response.send_message(f'{self.field_name} updated.', ephemeral=True)
         try:
             await self.view_ref.update_message()
@@ -507,10 +583,20 @@ class ConfigTextSelect(discord.ui.Select):
             return
         if self.values[0] == 'set':
             current_value = str(self.view.draft.get(self.field_name, ''))
+            self.view.debug_log(
+                'Text select prompting modal.',
+                field=self.field_name,
+                user_id=interaction.user.id
+            )
             await interaction.response.send_modal(
                 ConfigTextModal(self.view, self.field_name, self.label, current_value)
             )
             return
+        self.view.debug_log(
+            'Text select kept current value.',
+            field=self.field_name,
+            user_id=interaction.user.id
+        )
         await self.view.update_message(interaction)
 
 
@@ -524,6 +610,11 @@ class ConfigTextButton(discord.ui.Button):
         if not isinstance(self.view, ConfigSetupView):
             return
         current_value = str(self.view.draft.get(self.field_name, ''))
+        self.view.debug_log(
+            'Text button opened modal.',
+            field=self.field_name,
+            user_id=interaction.user.id
+        )
         await interaction.response.send_modal(
             ConfigTextModal(self.view, self.field_name, self.label, current_value)
         )
