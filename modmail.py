@@ -189,6 +189,8 @@ class HelpOptionView(discord.ui.View):
         )
         self.forwarded = True
         self.pending_message = None
+        if self.message is not None:
+            await clear_help_option_prompt_record(self.message.id)
 
     async def disable(self, interaction: discord.Interaction) -> None:
         """Disable dropdown controls after the user makes a selection."""
@@ -222,6 +224,7 @@ class HelpOptionView(discord.ui.View):
                 await self.message.channel.send(timeout_text)
             except discord.HTTPException:
                 pass
+        await clear_help_option_prompt_record(self.message.id)
 
 
 # Feature: interactive config wizard uses dropdowns to set config.json values without manual file edits.
@@ -804,11 +807,77 @@ except FileNotFoundError:
 # Feature: configurable help options let users route new tickets to the right helpers automatically.
 HELP_OPTIONS_FILE = 'help_options.json'
 HELP_OPTION_LIMIT = 25
+HELP_OPTION_PROMPTS_FILE = 'help_option_prompts.json'
+HELP_OPTION_TIMEOUT_SECONDS = 259200
+HELP_OPTION_EXPIRY_NOTICE = (
+    'The selection expired before we could send your message. Please send it again so we can help.'
+)
 
 
 # Feature: persist translation cache so repeated phrases reuse saved AI outputs.
 TRANSLATIONS_FILE = 'translations.json'
 translation_cache_lock = asyncio.Lock()
+
+# Feature: store help option prompts so timeouts can be recovered after restarts.
+help_option_prompt_lock = asyncio.Lock()
+
+
+def _load_help_option_prompt_records() -> dict[str, dict[str, object]]:
+    """Load help option prompt metadata for startup timeout handling."""
+
+    try:
+        with open(HELP_OPTION_PROMPTS_FILE, 'r', encoding='utf-8') as prompt_file:
+            loaded = json.load(prompt_file)
+            if isinstance(loaded, dict):
+                return {
+                    str(message_id): value
+                    for message_id, value in loaded.items()
+                    if isinstance(value, dict)
+                }
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError:
+        pass
+
+    with open(HELP_OPTION_PROMPTS_FILE, 'w', encoding='utf-8') as prompt_file:
+        json.dump({}, prompt_file, ensure_ascii=False, indent=2)
+    return {}
+
+
+help_option_prompt_records: dict[str, dict[str, object]] = _load_help_option_prompt_records()
+
+
+async def record_help_option_prompt(
+    message_id: int,
+    channel_id: int,
+    created_at: float,
+    *,
+    pending_message_id: int | None = None,
+    language: str | None = None
+) -> None:
+    """Persist a help option prompt so startup can recover timeout state."""
+
+    async with help_option_prompt_lock:
+        help_option_prompt_records[str(message_id)] = {
+            'channel_id': channel_id,
+            'created_at': created_at,
+            'pending_message_id': pending_message_id,
+            'language': language
+        }
+        with open(HELP_OPTION_PROMPTS_FILE, 'w', encoding='utf-8') as prompt_file:
+            json.dump(help_option_prompt_records, prompt_file, ensure_ascii=False, indent=2)
+
+
+async def clear_help_option_prompt_record(message_id: int) -> None:
+    """Remove a help option prompt record once it has been resolved."""
+
+    key = str(message_id)
+    async with help_option_prompt_lock:
+        if key not in help_option_prompt_records:
+            return
+        del help_option_prompt_records[key]
+        with open(HELP_OPTION_PROMPTS_FILE, 'w', encoding='utf-8') as prompt_file:
+            json.dump(help_option_prompt_records, prompt_file, ensure_ascii=False, indent=2)
 
 
 def _load_translation_cache() -> dict[str, dict[str, str]]:
@@ -2154,6 +2223,8 @@ async def on_ready():
         else:
             bot.tree_synced = True
     print(f'{bot.user.name} has connected to Discord!')
+    # Feature: sweep persisted help option prompts to catch timeouts missed during restarts.
+    await sweep_help_option_prompt_timeouts()
 
 
 
@@ -2730,6 +2801,60 @@ async def localise_text(text: str, language: str | None) -> str:
     translated = await translate_to_language(text, target)
     return translated or text
 
+
+async def sweep_help_option_prompt_timeouts() -> None:
+    """Handle help option prompts that expired while the bot was offline."""
+
+    now = time.time()
+    async with help_option_prompt_lock:
+        records = list(help_option_prompt_records.items())
+    expired_prompt_ids: list[str] = []
+    for prompt_id, record in records:
+        created_at = record.get('created_at')
+        if not isinstance(created_at, (int, float)):
+            expired_prompt_ids.append(prompt_id)
+            continue
+        if now - created_at < HELP_OPTION_TIMEOUT_SECONDS:
+            continue
+        channel_id = record.get('channel_id')
+        if isinstance(channel_id, str) and channel_id.isdigit():
+            channel_id = int(channel_id)
+        if not isinstance(channel_id, int):
+            expired_prompt_ids.append(prompt_id)
+            continue
+        language = record.get('language') if isinstance(record.get('language'), str) else None
+        expiry_text = HELP_OPTION_EXPIRY_NOTICE
+        try:
+            expiry_text = await localise_text(HELP_OPTION_EXPIRY_NOTICE, language)
+        except Exception:
+            pass
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.HTTPException):
+                channel = None
+        if channel is not None:
+            try:
+                prompt_message = await channel.fetch_message(int(prompt_id))
+                await prompt_message.edit(content=expiry_text, embed=None, view=None)
+            except (discord.NotFound, discord.HTTPException, ValueError):
+                pass
+            if record.get('pending_message_id') is not None:
+                try:
+                    await channel.send(expiry_text)
+                except discord.HTTPException:
+                    pass
+        expired_prompt_ids.append(prompt_id)
+    if not expired_prompt_ids:
+        return
+    async with help_option_prompt_lock:
+        for prompt_id in expired_prompt_ids:
+            help_option_prompt_records.pop(prompt_id, None)
+        with open(HELP_OPTION_PROMPTS_FILE, 'w', encoding='utf-8') as prompt_file:
+            json.dump(help_option_prompt_records, prompt_file, ensure_ascii=False, indent=2)
+
+
 async def get_translation_notice(language: str) -> str:
     """Return a translated footer notice for translated messages."""
     base = 'This message was translated using AI and may contain mistakes'
@@ -2874,7 +2999,7 @@ async def on_message(message):
             placeholder_base = 'Select the help topic that best matches your request.'
             prompt_title_base = 'How can we help?'
             prompt_body_base = 'Choose the option that best matches the support you need.'
-            expiry_base = 'The selection expired before we could send your message. Please send it again so we can help.'
+            expiry_base = HELP_OPTION_EXPIRY_NOTICE
             placeholder_text = await localise_text(placeholder_base, detected_language)
             prompt_title = await localise_text(prompt_title_base, detected_language)
             prompt_body = await localise_text(prompt_body_base, detected_language)
@@ -2909,6 +3034,13 @@ async def on_message(message):
                 return
             else:
                 help_view.message = prompt_message
+                await record_help_option_prompt(
+                    prompt_message.id,
+                    prompt_message.channel.id,
+                    time.time(),
+                    pending_message_id=message.id,
+                    language=detected_language
+                )
                 return
         else:
             await relay_user_message(
