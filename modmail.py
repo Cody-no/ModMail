@@ -296,6 +296,24 @@ class ConfigSetupView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+    # Feature: surface config wizard errors to the user and error channel instead of failing silently.
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item
+    ) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                'The configuration wizard ran into an error. Please try again.',
+                ephemeral=True
+            )
+        error_channel = get_error_channel()
+        if error_channel is not None:
+            await error_channel.send(
+                embed=embed_creator('Config Wizard Error', str(error), 'e')
+            )
+        raise error
 
     def build_embed(self) -> discord.Embed:
         def describe_channel(channel_id: int, label: str) -> str:
@@ -509,7 +527,6 @@ class ConfigTextButton(discord.ui.Button):
         await interaction.response.send_modal(
             ConfigTextModal(self.view, self.field_name, self.label, current_value)
         )
-        self.stop()
 
 
 # Feature: translate dropdown option labels and descriptions for users selecting categories.
