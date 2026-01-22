@@ -68,3 +68,4 @@
 * Routed ticket open/close message updates in the config wizard through modals for cleaner editing.
 * Defaulted auto-translated opening messages to English when language detection is inconclusive.
 * Updated language detection prompt to return English when the language cannot be determined.
+* Added `/helpoption edit` along with help option name autocomplete to speed up edits/removals while preserving existing settings when fields are omitted.
