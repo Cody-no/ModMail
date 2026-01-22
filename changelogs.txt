@@ -66,6 +66,7 @@
 * Added slash commands to manage help options, prompting users to categorise new tickets and pinging the matching support roles automatically.
 * Added a dropdown-driven configuration wizard to update config.json settings from Discord.
 * Routed ticket open/close message updates in the config wizard through modals for cleaner editing.
+* Prevented the config wizard from stopping after opening modals and added error reporting for wizard failures.
 * Defaulted auto-translated opening messages to English when language detection is inconclusive.
 * Updated language detection prompt to return English when the language cannot be determined.
 * Added `/helpoption edit` along with help option name autocomplete to speed up edits/removals while preserving existing settings when fields are omitted.
