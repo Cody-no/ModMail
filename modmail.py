@@ -3879,6 +3879,20 @@ async def search(ctx, user: discord.User, *, search_term: str = ''):
         await ctx.send(embed=embed)
 
 
+# Feature: provide a quick command to show how many tickets are currently active.
+@bot.command()
+@commands.guild_only()
+@commands.check(is_helper)
+async def activetickets(ctx):
+    """Shows the number of active tickets."""
+
+    with sqlite3.connect('tickets.db') as conn:
+        curs = conn.cursor()
+        total = curs.execute('SELECT COUNT(*) FROM tickets').fetchone()[0]
+
+    await ctx.send(embed=embed_creator('Active Tickets', f'There are **{total}** active ticket(s).', 'g'))
+
+
 @bot.command()
 @commands.check(is_helper)
 async def ping(ctx):
