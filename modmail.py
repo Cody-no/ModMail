@@ -1929,7 +1929,6 @@ async def relay_user_message(
     language: str | None = None,
     open_message_override: str | None = None
 ) -> None:
-    confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
     ticket_embed = embed_creator('Message Received', message.content, 'g', message.author)
     user_embed = embed_creator('Message Sent', message.content, 'g', guild)
     view = TranslateView(message.content) if message.content else None
@@ -1938,9 +1937,6 @@ async def relay_user_message(
     attachment_embeds = []
     attachment_count = 0
     if message.attachments:
-        await confirmation_message.edit(
-            embed=embed_creator('Sending Message...', 'This may take a few minutes.', 'g', guild)
-        )
         for attachment in message.attachments:
             attachment_count += 1
             total_filesize += attachment.size
@@ -1968,6 +1964,7 @@ async def relay_user_message(
         except Exception:
             translated_open = open_message
         await message.channel.send(embed=embed_creator('Ticket Created', translated_open, 'b', guild))
+    confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
     await confirmation_message.edit(embed=user_embed)
 
 
