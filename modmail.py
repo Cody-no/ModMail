@@ -1768,8 +1768,6 @@ async def relay_user_message(
         await thread.send(embed=ticket_embed, view=view)
         for index, file in enumerate(files):
             await thread.send(embed=attachment_embeds[index], file=file)
-    await confirmation_message.edit(embed=user_embed)
-
     if ticket_create:
         detected_language = language
         if detected_language is None:
@@ -1783,6 +1781,7 @@ async def relay_user_message(
         except Exception:
             translated_open = open_message
         await message.channel.send(embed=embed_creator('Ticket Created', translated_open, 'b', guild))
+    await confirmation_message.edit(embed=user_embed)
 
 
 async def get_or_create_ticket_for_user(user: discord.User, guild: discord.Guild) -> discord.Thread:
