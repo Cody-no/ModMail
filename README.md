@@ -60,6 +60,9 @@ The script requires Python 3.10 or higher and the packages listed under Dependan
 ### Configuration
 Fill out [config.json](templates/config.json) with your own values, and put it in the same
 directory as [modmail.py](modmail.py). Then run the script, and your bot will be online!
+You can also use `/configwizard` in Discord to update `config.json` values in a server;
+it requires moderator permissions and updates the same settings described below. If you
+edit `config.json` manually, run `!refresh` to reload the file without restarting the bot.
 Create a `modmail.env` file alongside the script and store your `DISCORD_TOKEN` and
 `OPENAI_API_KEY` inside it. These are loaded automatically at runtime.
 
