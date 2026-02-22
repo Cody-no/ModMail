@@ -2763,10 +2763,6 @@ async def translate_text(text: str) -> str:
     if language in ('en', 'english'):
         return text
 
-    cached = get_cached_translation(text, 'english')
-    if cached:
-        return cached
-
     try:
         # Updated prompt for clearer translations without disclaimers
         response = await openai_client.chat.completions.create(
@@ -2783,14 +2779,12 @@ async def translate_text(text: str) -> str:
         translated = clean_guard_markers(translated)
         # The notice text lives only in the system prompt so it never
         # appears in the translated result returned to the bot
-        if translated and translated != text:
-            await cache_translation(text, 'english', translated)
         return translated
     except Exception:
         return text
 
 # Feature: translate moderator replies into arbitrary languages for users using GPT-4o
-async def translate_to_language(text: str, language: str) -> str:
+async def translate_to_language(text: str, language: str, *, use_cache: bool = False) -> str:
     """Translate provided text to the specified language using GPT-4o."""
 
     if not text.strip():
@@ -2798,9 +2792,10 @@ async def translate_to_language(text: str, language: str) -> str:
     if language_is_english(language):
         return text
 
-    cached = get_cached_translation(text, language)
-    if cached:
-        return cached
+    if use_cache:
+        cached = get_cached_translation(text, language)
+        if cached:
+            return cached
     try:
         # Updated prompt for translating moderator messages
         response = await openai_client.chat.completions.create(
@@ -2817,7 +2812,8 @@ async def translate_to_language(text: str, language: str) -> str:
         translated = clean_guard_markers(translated)
         # The notice guides the model but is never included in the final
         # translated text sent back to moderators or users
-        if translated and translated != text:
+        # Feature: keep translation caching scoped to automatic system messages only.
+        if use_cache and translated and translated != text:
             await cache_translation(text, language, translated)
         return translated
     except Exception:
@@ -2874,7 +2870,8 @@ async def localise_text(text: str, language: str | None) -> str:
     if language_is_english(language):
         return text
     target = language or 'English'
-    translated = await translate_to_language(text, target)
+    # Feature: automatic helper prompts reuse cache entries to reduce repeated translation calls.
+    translated = await translate_to_language(text, target, use_cache=True)
     return translated or text
 
 
