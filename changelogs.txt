@@ -1,3 +1,4 @@
+* Limited translation cache reads/writes to automatic localisation messages so manual translated replies always request a fresh translation.
 * Added an admin-only `/memoryusage` slash command that shows per-task memory delta graphs and a leaderboard of top memory hungry tasks.
 * Documented `/configwizard` and `!refresh` in the README setup configuration guidance.
 * Persisted help option prompt metadata so expired dropdowns are cleaned up after restarts and users are notified to resend their messages.
