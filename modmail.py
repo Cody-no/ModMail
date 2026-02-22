@@ -19,6 +19,8 @@ import asyncio
 import aiohttp  # used for fetching logs in the search command
 import openai
 import httpx
+import tracemalloc
+from collections import deque
 from dotenv import load_dotenv
 
 # Load variables from a modmail.env file so tokens and API keys can be configured externally
@@ -842,6 +844,127 @@ TRANSLATION_NOTICE = (
 # Security: guard translation prompts against prompt injection attempts.
 PROMPT_GUARD_START = '<TEXT>'
 PROMPT_GUARD_END = '</TEXT>'
+
+
+# Feature: track memory deltas per asyncio task for usage graphs and leaderboards.
+@dataclasses.dataclass
+class TaskMemorySample:
+    name: str
+    start_memory: int
+    end_memory: int
+    delta: int
+    duration: float
+    created_at: float
+
+
+# Feature: centralised memory tracker builds delta graphs and a leaderboard for task memory usage.
+class MemoryUsageTracker:
+    def __init__(self, *, max_samples: int = 200) -> None:
+        self.samples: deque[TaskMemorySample] = deque(maxlen=max_samples)
+        self.summary: dict[str, dict[str, float]] = {}
+        self._installed = False
+
+    def ensure_tracing(self) -> None:
+        if not tracemalloc.is_tracing():
+            tracemalloc.start()
+
+    def describe_task(self, coro: object) -> str:
+        name = getattr(coro, '__qualname__', None) or getattr(coro, '__name__', None)
+        if name:
+            return name
+        return repr(coro)
+
+    async def track_task(self, coro: object, task_name: str):
+        start_time = time.monotonic()
+        start_memory = tracemalloc.get_traced_memory()[0]
+        try:
+            return await coro
+        finally:
+            end_memory = tracemalloc.get_traced_memory()[0]
+            delta = end_memory - start_memory
+            duration = time.monotonic() - start_time
+            sample = TaskMemorySample(
+                name=task_name,
+                start_memory=start_memory,
+                end_memory=end_memory,
+                delta=delta,
+                duration=duration,
+                created_at=time.time()
+            )
+            self.samples.append(sample)
+            stats = self.summary.setdefault(
+                task_name,
+                {'count': 0, 'total_delta': 0.0, 'positive_total': 0.0, 'max_delta': 0.0}
+            )
+            stats['count'] += 1
+            stats['total_delta'] += delta
+            if delta > 0:
+                stats['positive_total'] += delta
+            if delta > stats['max_delta']:
+                stats['max_delta'] = delta
+
+    def install(self, loop: asyncio.AbstractEventLoop) -> bool:
+        if self._installed:
+            return False
+        self.ensure_tracing()
+
+        def task_factory(loop: asyncio.AbstractEventLoop, coro: object) -> asyncio.Task:
+            task_name = self.describe_task(coro)
+            return asyncio.Task(self.track_task(coro, task_name), loop=loop, name=task_name)
+
+        loop.set_task_factory(task_factory)
+        self._installed = True
+        return True
+
+    def format_bytes(self, size: int) -> str:
+        unit_labels = ('B', 'KB', 'MB', 'GB', 'TB')
+        value = float(size)
+        for unit in unit_labels:
+            if abs(value) < 1024.0 or unit == unit_labels[-1]:
+                return f'{value:,.1f}{unit}'
+            value /= 1024.0
+        return f'{value:,.1f}TB'
+
+    def build_delta_graph(self, *, limit: int = 15) -> str:
+        samples = list(self.samples)[-limit:]
+        if not samples:
+            return 'No task memory data has been recorded yet.'
+        max_delta = max(abs(sample.delta) for sample in samples) or 1
+        lines: list[str] = []
+        for sample in samples:
+            bar_units = int((abs(sample.delta) / max_delta) * 20)
+            bar = '█' * bar_units
+            sign = '+' if sample.delta >= 0 else '-'
+            label = sample.name
+            if len(label) > 32:
+                label = f'{label[:29]}...'
+            lines.append(
+                f'{sign}{self.format_bytes(abs(sample.delta)):>9} | {bar:<20} {label}'
+            )
+        return '\n'.join(lines)
+
+    def build_leaderboard(self, *, limit: int = 10) -> str:
+        if not self.summary:
+            return 'No task memory data has been recorded yet.'
+        ranked = sorted(
+            self.summary.items(),
+            key=lambda item: item[1]['positive_total'],
+            reverse=True
+        )
+        lines: list[str] = []
+        for index, (name, stats) in enumerate(ranked[:limit], start=1):
+            label = name
+            if len(label) > 32:
+                label = f'{label[:29]}...'
+            lines.append(
+                f'{index:>2}. {self.format_bytes(int(stats["positive_total"])):>9} total '
+                f'| {self.format_bytes(int(stats["max_delta"])):>9} max '
+                f'| {int(stats["count"]):>3} runs | {label}'
+            )
+        return '\n'.join(lines)
+
+
+memory_tracker = MemoryUsageTracker()
 
 
 def build_guarded_payload(text: str) -> str:
@@ -1960,6 +2083,40 @@ async def configwizard(interaction: discord.Interaction) -> None:
     view.message = await interaction.original_response()
 
 
+# Feature: expose task memory deltas through an admin-only slash command with graph and leaderboard views.
+@app_commands.command(name='memoryusage', description='Show task memory delta graphs and a memory leaderboard.')
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(limit='How many top memory-hungry tasks to include (1-15).')
+async def memoryusage_slash(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 15] = 10) -> None:
+    """Show task memory usage deltas and a leaderboard of memory-heavy tasks."""
+
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message('This command can only be used in a server.', ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message('Only server administrators can run this command.', ephemeral=True)
+        return
+
+    if not memory_tracker.samples:
+        await interaction.response.send_message(
+            embed=embed_creator('Memory Usage Tracker', 'No task memory data has been recorded yet.', 'b'),
+            ephemeral=True
+        )
+        return
+
+    graph = memory_tracker.build_delta_graph(limit=15)
+    leaderboard = memory_tracker.build_leaderboard(limit=limit)
+    embed = embed_creator('Memory Usage Tracker', 'Recent task memory deltas and top memory consumers.', 'b')
+    embed.add_field(name='Recent Task Memory Deltas', value=f'```{graph}```', inline=False)
+    embed.add_field(
+        name=f'Top {limit} Memory Hungry Tasks',
+        value=f'```{leaderboard}```',
+        inline=False
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # Feature: let moderators revise every help prompt translation for a language in one modal.
 @dataclasses.dataclass
 class TranslationSegment:
@@ -2284,6 +2441,7 @@ bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
 bot.tree.add_command(help_option_group, guild=discord.Object(id=config.guild_id))
 bot.tree.add_command(translation_group, guild=discord.Object(id=config.guild_id))
 bot.tree.add_command(configwizard, guild=discord.Object(id=config.guild_id))
+bot.tree.add_command(memoryusage_slash, guild=discord.Object(id=config.guild_id))
 
 
 @bot.event
@@ -2297,6 +2455,8 @@ async def on_ready():
         else:
             bot.tree_synced = True
     print(f'{bot.user.name} has connected to Discord!')
+    # Feature: install the memory tracker once so every task has a recorded memory delta.
+    memory_tracker.install(asyncio.get_running_loop())
     # Feature: sweep persisted help option prompts to catch timeouts missed during restarts.
     await sweep_help_option_prompt_timeouts()
 
