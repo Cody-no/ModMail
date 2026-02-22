@@ -3071,12 +3071,15 @@ async def sweep_help_option_prompt_timeouts() -> None:
             except (discord.NotFound, discord.HTTPException):
                 channel = None
         if channel is not None:
+            # Feature: only post expiry follow-ups when the original prompt is still an active selection message.
+            should_send_expiry_followup = False
             try:
                 prompt_message = await channel.fetch_message(int(prompt_id))
+                should_send_expiry_followup = bool(prompt_message.components)
                 await prompt_message.edit(content=expiry_text, embed=None, view=None)
             except (discord.NotFound, discord.HTTPException, ValueError):
                 pass
-            if record.get('pending_message_id') is not None:
+            if should_send_expiry_followup and record.get('pending_message_id') is not None:
                 try:
                     await channel.send(expiry_text)
                 except discord.HTTPException:
