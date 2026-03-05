@@ -1,3 +1,4 @@
+* Fixed `!send`, standard replies, and translated replies falsely failing with "User not in server" by replacing `mutual_guilds` checks with cache-aware guild member lookups.
 * Replaced internal Discord view timeouts for help option prompts and the config wizard with manual expiry checks, eliminating `BaseView.__timeout_task_impl` runtime warnings while preserving the same user-facing timeout behavior.
 * Limited translation cache reads/writes to automatic localisation messages so manual translated replies always request a fresh translation.
 * Added an admin-only `/memoryusage` slash command that shows per-task memory delta graphs and a leaderboard of top memory hungry tasks.
