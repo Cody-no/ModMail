@@ -418,7 +418,8 @@ class ConfigSetupView(discord.ui.View):
         def describe_user(user_id: int, label: str) -> str:
             member = self.guild.get_member(user_id)
             if member is None:
-                return f'{label}: `{user_id}` (missing)'
+                # Feature: avoid false missing labels when member cache is intentionally disabled to save memory.
+                return f'{label}: `{user_id}` (unresolved in cache)'
             return f'{label}: {member.mention}'
 
         def describe_text(value: str, label: str, limit: int = 140) -> str:
@@ -1495,7 +1496,7 @@ def is_modmail_channel(obj):
 
 
 # Feature: mirror the moderator role hierarchy checks for interactions.
-def interaction_is_mod(interaction: discord.Interaction) -> bool:
+async def interaction_is_mod(interaction: discord.Interaction) -> bool:
     if interaction.guild is None or interaction.guild.id != config.guild_id:
         return False
     mod_role = interaction.guild.get_role(config.mod_role_id)
@@ -1504,8 +1505,14 @@ def interaction_is_mod(interaction: discord.Interaction) -> bool:
     if isinstance(interaction.user, discord.Member):
         member = interaction.user
     else:
+        # Feature: fall back to API member fetch when cache is disabled for lower memory usage.
         member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.top_role >= mod_role
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except (discord.NotFound, discord.HTTPException):
+                return False
+    return member.top_role >= mod_role
 
 
 # Feature: validate that configured channels expecting plain-text output are still text channels.
@@ -1727,7 +1734,7 @@ async def helpoption_add(
     opening_message: str | None = None,
     auto_close_message: str | None = None
 ) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
         return
 
@@ -1880,7 +1887,7 @@ async def helpoption_edit(
     opening_message: str | None = None,
     auto_close_message: str | None = None
 ) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
         return
 
@@ -2012,7 +2019,7 @@ async def helpoption_edit(
 @app_commands.describe(name='The help option to remove.')
 @app_commands.autocomplete(name=help_option_name_autocomplete)
 async def helpoption_remove(interaction: discord.Interaction, name: str) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage help options.', ephemeral=True)
         return
 
@@ -2029,7 +2036,7 @@ async def helpoption_remove(interaction: discord.Interaction, name: str) -> None
 @help_option_group.command(name='list', description='Show every configured help option.')
 @app_commands.guild_only()
 async def helpoption_list(interaction: discord.Interaction) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to view help options.', ephemeral=True)
         return
 
@@ -2072,7 +2079,7 @@ async def helpoption_list(interaction: discord.Interaction) -> None:
 @app_commands.command(name='configwizard', description='Open the configuration setup wizard.')
 @app_commands.guild_only()
 async def configwizard(interaction: discord.Interaction) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to update configuration.', ephemeral=True)
         return
     if interaction.guild is None:
@@ -2245,7 +2252,7 @@ async def translation_language_autocomplete(
 )
 @app_commands.autocomplete(language=translation_language_autocomplete)
 async def translation_edit(interaction: discord.Interaction, language: str) -> None:
-    if not interaction_is_mod(interaction):
+    if not await interaction_is_mod(interaction):
         await interaction.response.send_message('You do not have permission to manage translations.', ephemeral=True)
         return
 
@@ -2861,7 +2868,8 @@ async def send_message(message, text, anon):
         user_id = user_id[0]
         user = bot.get_user(user_id)
         if user is None:
-            await bot.fetch_user(user_id)
+            # Bug fix: assign fetch results so downstream checks and sends always use a resolved user object.
+            user = await bot.fetch_user(user_id)
         elif message.guild not in user.mutual_guilds:
             await message.channel.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
             return
@@ -3121,7 +3129,8 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         user_id = user_id[0]
         user = bot.get_user(user_id)
         if user is None:
-            await bot.fetch_user(user_id)
+            # Bug fix: assign fetch results so downstream checks and sends always use a resolved user object.
+            user = await bot.fetch_user(user_id)
         elif message.guild not in user.mutual_guilds:
             await message.channel.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
             return
@@ -3601,10 +3610,8 @@ async def sendmany(ctx, ids: str, group_name: str, *, message: str = ''):
             failures.append(f'User `{user_id}` could not be fetched.')
             continue
 
-        if ctx.guild.get_member(user_id) is None:
-            failures.append(f'{user.mention} is not in this guild.')
-            continue
 
+        # Feature: avoid cache-only guild member checks so sendmany remains reliable with disabled member caching.
         try:
             thread = await get_or_create_ticket_for_user(user, ctx.guild)
         except discord.HTTPException:

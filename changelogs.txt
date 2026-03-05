@@ -86,3 +86,7 @@
 * Added `!activetickets` so helpers can check the number of active tickets in Discord.
 * Trimmed config wizard modal defaults to stay within Discord input limits and avoid invalid form errors.
 * Reduced Discord startup memory usage by disabling startup guild chunking and member caching while keeping required intents enabled for ticket workflows.
+* Fixed `!sendmany` to avoid cache-only guild member checks so bulk sends stay reliable when member caching is disabled.
+* Improved slash-command moderator checks by fetching members when cache misses occur under low-memory settings.
+* Updated config wizard owner preview wording to show uncached IDs as unresolved instead of incorrectly marking them missing.
+* Fixed `!send` and translated send flows to store `fetch_user` results before mutual guild and DM operations.
