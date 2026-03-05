@@ -90,3 +90,4 @@
 * Improved slash-command moderator checks by fetching members when cache misses occur under low-memory settings.
 * Updated config wizard owner preview wording to show uncached IDs as unresolved instead of incorrectly marking them missing.
 * Fixed `!send` and translated send flows to store `fetch_user` results before mutual guild and DM operations.
+* Fixed Discord view timeout shutdown cleanup by explicitly stopping timed-out help option and config wizard views, preventing "coroutine BaseView.__timeout_task_impl was never awaited" runtime warnings on exit.
