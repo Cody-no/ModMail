@@ -2435,8 +2435,23 @@ def buffers_to_payloads(buffers: list[tuple[io.BytesIO, str]]) -> list[tuple[str
     return payloads
 
 
-bot = commands.Bot(command_prefix=config.prefix, intents=discord.Intents.all(),
-                   activity=discord.CustomActivity(name='DM to Contact Mods'), help_command=HelpCommand())
+# Feature: reduce gateway memory pressure by limiting member cache growth and startup guild chunking.
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+intents.messages = True
+intents.message_content = True
+intents.reactions = True
+intents.dm_messages = True
+
+bot = commands.Bot(
+    command_prefix=config.prefix,
+    intents=intents,
+    member_cache_flags=discord.MemberCacheFlags.none(),
+    chunk_guilds_at_startup=False,
+    activity=discord.CustomActivity(name='DM to Contact Mods'),
+    help_command=HelpCommand()
+)
 
 bot.tree.add_command(help_option_group, guild=discord.Object(id=config.guild_id))
 bot.tree.add_command(translation_group, guild=discord.Object(id=config.guild_id))
