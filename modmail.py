@@ -210,6 +210,7 @@ class HelpOptionView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         if not self.children or self.message is None:
+            self.stop()
             return
         for child in self.children:
             child.disabled = True
@@ -227,6 +228,9 @@ class HelpOptionView(discord.ui.View):
             except discord.HTTPException:
                 pass
         await clear_help_option_prompt_record(self.message.id)
+        # Intent: explicitly stop the view after timeout cleanup so Discord does not try to
+        # reschedule timeout handlers while the event loop is shutting down.
+        self.stop()
 
 
 # Feature: interactive config wizard uses dropdowns to set config.json values without manual file edits.
@@ -377,6 +381,9 @@ class ConfigSetupView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+        # Intent: stop listening after the timeout UI update to prevent stale timeout task
+        # scheduling attempts during shutdown.
+        self.stop()
     # Feature: surface config wizard errors to the user and error channel instead of failing silently.
     async def on_error(
         self,
