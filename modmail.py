@@ -54,6 +54,17 @@ class HelpOptionDropdown(discord.ui.Select):
         self.thread_id = thread_id
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if isinstance(self.view, HelpOptionView) and self.view.is_expired():
+            await self.view.expire_prompt()
+            try:
+                timeout_text = await localise_text(self.view.expiry_notice, self.view.language)
+            except Exception:
+                timeout_text = self.view.expiry_notice
+            if interaction.response.is_done():
+                await interaction.followup.send(timeout_text)
+            else:
+                await interaction.response.send_message(timeout_text)
+            return
         selection = self.values[0]
         option_config = help_options.get(selection)
         role_id = option_config.role_id if option_config else None
@@ -155,8 +166,8 @@ class HelpOptionView(discord.ui.View):
         expiry_notice: str | None = None,
         options: list[discord.SelectOption] | None = None
     ):
-        # Feature: keep help option dropdowns active for three days to give users time to respond.
-        super().__init__(timeout=259200)
+        # Bug fix: avoid Discord's internal timeout task runtime warning by handling expiry manually.
+        super().__init__(timeout=None)
         self.thread_id = thread_id
         self.message: discord.Message | None = None
         self.placeholder_text = placeholder
@@ -168,8 +179,15 @@ class HelpOptionView(discord.ui.View):
         self.expiry_notice = expiry_notice or (
             'The selection expired before we could send your message. Please send it again so we can help.'
         )
+        self.created_at = time.time()
+        self.timeout_seconds = HELP_OPTION_TIMEOUT_SECONDS
         if help_options and options:
             self.add_item(HelpOptionDropdown(thread_id, placeholder, options))
+
+    def is_expired(self) -> bool:
+        """Return True when the dropdown has passed the configured lifetime."""
+
+        return (time.time() - self.created_at) >= self.timeout_seconds
 
     async def handle_selection_completion(
         self,
@@ -208,7 +226,9 @@ class HelpOptionView(discord.ui.View):
             pass
         self.stop()
 
-    async def on_timeout(self) -> None:
+    async def expire_prompt(self) -> None:
+        """Disable an expired help prompt and notify the user to resend their message."""
+
         if not self.children or self.message is None:
             self.stop()
             return
@@ -228,18 +248,19 @@ class HelpOptionView(discord.ui.View):
             except discord.HTTPException:
                 pass
         await clear_help_option_prompt_record(self.message.id)
-        # Intent: explicitly stop the view after timeout cleanup so Discord does not try to
-        # reschedule timeout handlers while the event loop is shutting down.
         self.stop()
 
 
 # Feature: interactive config wizard uses dropdowns to set config.json values without manual file edits.
 class ConfigSetupView(discord.ui.View):
     def __init__(self, author_id: int, guild: discord.Guild):
-        super().__init__(timeout=900)
+        # Bug fix: avoid discord.py timeout task warnings by enforcing expiry manually.
+        super().__init__(timeout=None)
         self.author_id = author_id
         self.guild = guild
         self.message: discord.Message | None = None
+        self.created_at = time.time()
+        self.timeout_seconds = 900
         self.page = 0
         self.page_count = 3
         # Feature: emit console debug traces for config wizard interactions to aid troubleshooting.
@@ -357,6 +378,18 @@ class ConfigSetupView(discord.ui.View):
         await self.update_message(interaction)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if (time.time() - self.created_at) >= self.timeout_seconds:
+            self.debug_log('Wizard interaction ignored because the view expired.')
+            for child in self.children:
+                child.disabled = True
+            if self.message is not None:
+                try:
+                    await self.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
+            self.stop()
+            await interaction.response.send_message('This setup wizard has expired. Please run /configwizard again.', ephemeral=True)
+            return False
         if interaction.user.id == self.author_id:
             self.debug_log(
                 'Interaction check passed.',
