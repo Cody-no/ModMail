@@ -1555,6 +1555,18 @@ async def interaction_is_mod(interaction: discord.Interaction) -> bool:
     return member.top_role >= mod_role
 
 
+async def resolve_guild_member(guild: discord.Guild, user_id: int) -> discord.Member | None:
+    """Return a guild member using cache first, then API fallback when cache is disabled."""
+
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except (discord.NotFound, discord.HTTPException):
+        return None
+
+
 # Feature: validate that configured channels expecting plain-text output are still text channels.
 def require_text_channel(channel_id: int, purpose: str) -> discord.TextChannel:
     """Return the named text channel or raise if it is missing or the wrong type."""
@@ -2910,7 +2922,8 @@ async def send_message(message, text, anon):
         if user is None:
             # Bug fix: assign fetch results so downstream checks and sends always use a resolved user object.
             user = await bot.fetch_user(user_id)
-        elif message.guild not in user.mutual_guilds:
+        # Bug fix: validate membership with guild member lookups because mutual_guilds can be empty when member caching is disabled.
+        elif await resolve_guild_member(message.guild, user_id) is None:
             await message.channel.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
             return
     except (ValueError, TypeError, discord.NotFound):
@@ -3171,7 +3184,8 @@ async def send_translated_message(message, language: str, text: str, anon: bool)
         if user is None:
             # Bug fix: assign fetch results so downstream checks and sends always use a resolved user object.
             user = await bot.fetch_user(user_id)
-        elif message.guild not in user.mutual_guilds:
+        # Bug fix: validate membership with guild member lookups because mutual_guilds can be empty when member caching is disabled.
+        elif await resolve_guild_member(message.guild, user_id) is None:
             await message.channel.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
             return
     except (ValueError, TypeError, discord.NotFound):
@@ -3440,7 +3454,8 @@ async def send(ctx, user: discord.User, *, message: str = ''):
             return
 
 
-    if ctx.guild not in user.mutual_guilds:
+    # Bug fix: validate membership with guild member lookups because mutual_guilds can be empty when member caching is disabled.
+    if await resolve_guild_member(ctx.guild, user.id) is None:
         await ctx.send(embed=embed_creator('Failed to Send', 'User not in server.', 'e'))
         return
 
