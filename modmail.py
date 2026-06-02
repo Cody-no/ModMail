@@ -2404,8 +2404,8 @@ async def relay_user_message(
         except Exception:
             translated_open = open_message
         await message.channel.send(embed=embed_creator('Ticket Created', translated_open, 'b', guild))
-    confirmation_message = await message.channel.send(embed=embed_creator('Sending Message...', '', 'g', guild))
-    await confirmation_message.edit(embed=user_embed)
+    # Bug fix: send the final confirmation directly so users are never left with a stale "Sending Message..." embed.
+    await message.channel.send(embed=user_embed)
 
 
 async def get_or_create_ticket_for_user(user: discord.User, guild: discord.Guild) -> discord.Thread:
